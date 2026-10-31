@@ -244,7 +244,7 @@ impl PianoProfile {
 
     /// Get the profiles directory path.
     pub fn profiles_dir() -> Option<PathBuf> {
-        ProjectDirs::from("", "", "pianito").map(|dirs| dirs.data_dir().join("profiles"))
+        ProjectDirs::from("", "", "pianoTunerFree").map(|dirs| dirs.data_dir().join("profiles"))
     }
 
     /// Get the path for this profile's file.

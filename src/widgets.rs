@@ -1,6 +1,6 @@
 //! Dibujos propios: medidor de cents y teclado de 88 teclas.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
@@ -41,7 +41,13 @@ fn is_black(midi: u8) -> bool {
 /// Medidor horizontal de cents (-50 a +50) con la zona afinada en verde.
 /// `cents = None` muestra el medidor vacio. `fresh = false` lo atenua
 /// (lectura retenida despues de que la nota se apago).
-pub fn cents_meter(ui: &mut egui::Ui, cents: Option<f32>, tolerance: f32, fresh: bool) {
+pub fn cents_meter(
+    ui: &mut egui::Ui,
+    cents: Option<f32>,
+    tolerance: f32,
+    fresh: bool,
+    labels: (&str, &str),
+) {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 110.0), Sense::hover());
     let p = ui.painter_at(rect);
@@ -87,14 +93,14 @@ pub fn cents_meter(ui: &mut egui::Ui, cents: Option<f32>, tolerance: f32, fresh:
     p.text(
         Pos2::new(bar.left(), rect.top() + 12.0),
         Align2::LEFT_CENTER,
-        "◀ baja: tensar la cuerda",
+        labels.0,
         FontId::proportional(13.0),
         fg.gamma_multiply(0.6),
     );
     p.text(
         Pos2::new(bar.right(), rect.top() + 12.0),
         Align2::RIGHT_CENTER,
-        "alta: aflojar la cuerda ▶",
+        labels.1,
         FontId::proportional(13.0),
         fg.gamma_multiply(0.6),
     );
@@ -129,7 +135,7 @@ pub fn cents_meter(ui: &mut egui::Ui, cents: Option<f32>, tolerance: f32, fresh:
 pub fn keyboard(
     ui: &mut egui::Ui,
     current: Option<u8>,
-    done: &HashSet<u8>,
+    done: &HashMap<u8, bool>,
     string_count: impl Fn(u8) -> u8,
 ) -> Option<u8> {
     let width = ui.available_width();
@@ -164,17 +170,15 @@ pub fn keyboard(
 
     let fill = |midi: u8, black: bool| {
         if Some(midi) == current {
-            BLUE
-        } else if done.contains(&midi) {
-            if black {
-                Color32::from_rgb(25, 110, 55)
-            } else {
-                Color32::from_rgb(150, 220, 170)
-            }
-        } else if black {
-            Color32::from_gray(25)
-        } else {
-            Color32::from_gray(245)
+            return BLUE;
+        }
+        match done.get(&midi) {
+            Some(true) if black => Color32::from_rgb(25, 110, 55),
+            Some(true) => Color32::from_rgb(150, 220, 170),
+            Some(false) if black => Color32::from_rgb(150, 80, 10),
+            Some(false) => Color32::from_rgb(245, 195, 130),
+            None if black => Color32::from_gray(25),
+            None => Color32::from_gray(245),
         }
     };
 

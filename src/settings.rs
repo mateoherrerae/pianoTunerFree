@@ -22,6 +22,29 @@ pub struct Settings {
     /// Segundos que se mantiene en pantalla la ultima lectura despues de
     /// que la nota se apaga (ayuda con los agudos que duran poco).
     pub hold_secs: f32,
+    /// Idioma de la interfaz.
+    pub lang: Lang,
+    /// Aprendiz (recuerda apagar cuerdas) o avanzado (pasos directos).
+    pub mode: Mode,
+    /// Pasar solo al siguiente paso cuando la nota queda estable en la
+    /// zona verde (solo en pasos que se miden contra el objetivo).
+    pub auto_advance: bool,
+    /// Segundos que la nota tiene que quedar en la zona verde para avanzar.
+    pub auto_secs: f32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum Lang {
+    #[default]
+    Es,
+    En,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum Mode {
+    #[default]
+    Apprentice,
+    Advanced,
 }
 
 impl Default for Settings {
@@ -33,6 +56,10 @@ impl Default for Settings {
             tolerance: 5.0,
             stretch: true,
             hold_secs: 3.0,
+            lang: Lang::Es,
+            mode: Mode::Apprentice,
+            auto_advance: false,
+            auto_secs: 1.0,
         }
     }
 }
@@ -57,6 +84,14 @@ impl Settings {
             if let Ok(json) = serde_json::to_string_pretty(self) {
                 let _ = std::fs::write(p, json);
             }
+        }
+    }
+
+    /// Elige el texto en el idioma actual.
+    pub fn t(&self, es: &'static str, en: &'static str) -> &'static str {
+        match self.lang {
+            Lang::Es => es,
+            Lang::En => en,
         }
     }
 

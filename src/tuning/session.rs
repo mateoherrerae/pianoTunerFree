@@ -147,7 +147,7 @@ impl Session {
 
     /// Get the sessions directory path.
     fn sessions_dir() -> Option<PathBuf> {
-        ProjectDirs::from("", "", "pianito").map(|dirs| dirs.data_dir().join("sessions"))
+        ProjectDirs::from("", "", "pianoTunerFree").map(|dirs| dirs.data_dir().join("sessions"))
     }
 
     /// Get the path for this session's file.
