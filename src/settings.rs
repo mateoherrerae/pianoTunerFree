@@ -115,6 +115,10 @@ pub struct Settings {
     pub hold_secs: f32,
     /// El afinador libre usa el estiramiento del piano.
     pub free_stretch: bool,
+    /// Afinar con tira de fieltro en dos pasadas.
+    pub strip_mode: bool,
+    /// Estado: se esta haciendo la pasada de unisonos.
+    pub unison_pass: bool,
     /// Nota de referencia con sonido de piano (si no, tono puro).
     pub ref_piano: bool,
     /// Microfono elegido (None = el predeterminado de Windows).
@@ -140,6 +144,8 @@ impl Default for Settings {
             auto_secs: 1.0,
             hold_secs: 3.0,
             ref_piano: true,
+            strip_mode: false,
+            unison_pass: false,
             free_stretch: true,
             mic_device: None,
         };

@@ -57,6 +57,82 @@ struct Step {
     detail: Text,
 }
 
+/// Pasada del modo tira de fieltro.
+#[derive(Clone, Copy, PartialEq)]
+enum StripPass {
+    /// Sin tira: cada nota completa (cuerda + unisonos).
+    Off,
+    /// Pasada 1: solo la cuerda libre de cada nota.
+    Pitch,
+    /// Pasada 2: solo los unisonos.
+    Unisons,
+}
+
+/// Pasos en el modo tira de fieltro. `move_strip` agrega un recordatorio
+/// para poner o correr la tira (al empezar cada etapa).
+fn strip_steps(strings: u8, pass: StripPass, move_strip: bool) -> Vec<Step> {
+    let s = |kind, title, detail| Step {
+        kind,
+        title,
+        detail,
+    };
+    use StepKind::*;
+    let mut v = Vec::new();
+    match pass {
+        StripPass::Pitch => {
+            if move_strip {
+                v.push(s(
+                    Mute,
+                    ("Poné o corré la tira", "Place or move the strip"),
+                    (
+                        "Poné la tira de fieltro en la zona que vas a afinar para que suene una sola cuerda por nota. Cuando esté, apretá «Listo».",
+                        "Place the felt strip over the section you are about to tune so only one string per note sounds. Then press \"Done\".",
+                    ),
+                ));
+            }
+            v.push(s(
+                Pitch,
+                ("Afiná la cuerda libre", "Tune the free string"),
+                (
+                    "Con la tira puesta suena una sola cuerda: afinala. Los unísonos van en la segunda pasada.",
+                    "With the strip in place only one string sounds: tune it. Unisons come in the second pass.",
+                ),
+            ));
+        }
+        StripPass::Unisons => match strings {
+            1 => {}
+            2 => v.push(s(
+                Unison,
+                ("Unísono", "Unison"),
+                (
+                    "Sacá la tira de esta nota y afiná la otra cuerda hasta que no haya batido.",
+                    "Pull the strip from this note and tune the other string until there are no beats.",
+                ),
+            )),
+            _ => {
+                v.push(s(
+                    Unison,
+                    ("Primer unísono", "First unison"),
+                    (
+                        "Liberá una cuerda de los costados y afinala contra la del medio hasta que no haya batido.",
+                        "Free one outer string and tune it to the center one until there are no beats.",
+                    ),
+                ));
+                v.push(s(
+                    Unison,
+                    ("Segundo unísono", "Second unison"),
+                    (
+                        "Liberá la otra cuerda y afinala contra las dos hasta que no haya batido.",
+                        "Free the other string and tune it to the other two until there are no beats.",
+                    ),
+                ));
+            }
+        },
+        StripPass::Off => {}
+    }
+    v
+}
+
 fn steps_for(strings: u8, remind_mute: bool) -> Vec<Step> {
     let s = |kind, title, detail| Step {
         kind,
@@ -505,7 +581,27 @@ impl TunerApp {
 
     // ------------------------------------------------------------- Sesiones
 
+    fn strip_pass(&self) -> StripPass {
+        match (self.settings.strip_mode, self.settings.unison_pass) {
+            (false, _) => StripPass::Off,
+            (true, false) => StripPass::Pitch,
+            (true, true) => StripPass::Unisons,
+        }
+    }
+
+    /// Termino la pasada 1 con tira: volver al principio para los unisonos.
+    fn start_unison_pass(&mut self) {
+        self.settings.unison_pass = true;
+        let first = TuningOrder::new().note_at(0).map(|n| n.midi);
+        if let (Some(f), Some(m)) = (self.flow.as_mut(), first) {
+            f.go_to_midi(m);
+        }
+        self.reset_note_state();
+        self.save_session();
+    }
+
     fn start_tuning(&mut self) {
+        self.settings.unison_pass = false;
         self.settings.apply_string_layout();
         if let Some(old) = self.resumable.take() {
             let _ = old.delete();
@@ -1023,6 +1119,14 @@ impl TunerApp {
                 "Intervalos de control con su batido esperado (afinadores)",
                 "Check intervals with their expected beat rate (for tuners)",
             ),
+            s.t(
+                "Afino con tira de fieltro (2 pasadas: cuerdas libres y después unísonos)",
+                "I use a felt strip (2 passes: free strings, then unisons)",
+            ),
+            s.t(
+                "Como los afinadores: con la tira puesta se afina una cuerda por nota en todo el piano, y en una segunda pasada se hacen los unísonos.",
+                "Like pro tuners: with the strip in place you tune one string per note across the piano, then do the unisons in a second pass.",
+            ),
         );
         egui::CollapsingHeader::new(RichText::new(title).size(20.0).strong())
             .id_salt("help")
@@ -1038,6 +1142,8 @@ impl TunerApp {
                 ui.checkbox(&mut self.settings.fine_meter, l.6);
                 ui.checkbox(&mut self.settings.strobe, l.7);
                 ui.checkbox(&mut self.settings.show_intervals, l.11);
+                ui.checkbox(&mut self.settings.strip_mode, l.12)
+                    .on_hover_text(l.13);
                 egui::Grid::new("help_grid")
                     .num_columns(2)
                     .spacing([24.0, 8.0])
@@ -1119,7 +1225,23 @@ impl TunerApp {
             self.ui_finished(ui);
             return;
         };
-        let steps = steps_for(current.string_count, self.settings.remind_mute);
+        let pass = self.strip_pass();
+        let steps = match pass {
+            StripPass::Off => steps_for(current.string_count, self.settings.remind_mute),
+            _ => strip_steps(
+                current.string_count,
+                pass,
+                self.settings.remind_mute && matches!(current.note_index, 0 | 13 | 56),
+            ),
+        };
+        if steps.is_empty() {
+            // Nota de una cuerda en la pasada de unisonos: no hay nada que hacer.
+            if let Some(f) = self.flow.as_mut() {
+                f.skip_current_note();
+            }
+            self.reset_note_state();
+            return;
+        }
         self.step = self.step.min(steps.len() - 1);
         let step = &steps[self.step];
         let name = Note::from_midi(current.midi).map(|n| n.name).unwrap_or("?");
@@ -1145,6 +1267,29 @@ impl TunerApp {
             .map(|f| f.session().completed_notes.len())
             .unwrap_or(0);
         let (phase, phase_hint) = phase_text(current.note_index, lang);
+        match pass {
+            StripPass::Pitch => {
+                ui.label(
+                    RichText::new(self.t(
+                        "Tira de fieltro · Pasada 1 de 2: cuerdas libres",
+                        "Felt strip · Pass 1 of 2: free strings",
+                    ))
+                    .strong()
+                    .color(ORANGE),
+                );
+            }
+            StripPass::Unisons => {
+                ui.label(
+                    RichText::new(self.t(
+                        "Tira de fieltro · Pasada 2 de 2: unísonos",
+                        "Felt strip · Pass 2 of 2: unisons",
+                    ))
+                    .strong()
+                    .color(ORANGE),
+                );
+            }
+            StripPass::Off => {}
+        }
         ui.horizontal(|ui| {
             ui.add(
                 egui::ProgressBar::new(done_count as f32 / current.total_notes.max(1) as f32)
@@ -1325,6 +1470,10 @@ impl TunerApp {
             if self.step + 1 < n_steps {
                 self.step += 1;
                 changed_step = true;
+            } else if pass == StripPass::Unisons {
+                // Conserva el desvio medido en la primera pasada.
+                flow.skip_current_note();
+                changed_note = true;
             } else {
                 flow.confirm_current_note(final_cents);
                 changed_note = true;
@@ -1333,6 +1482,13 @@ impl TunerApp {
             if self.step > 0 {
                 self.step -= 1;
                 changed_step = true;
+            } else if pass == StripPass::Unisons {
+                let prev = current
+                    .note_index
+                    .checked_sub(1)
+                    .and_then(|i| TuningOrder::new().note_at(i))
+                    .map(|n| n.midi);
+                changed_note = prev.is_some_and(|m| flow.go_to_midi(m));
             } else if flow.go_back_note() {
                 changed_note = true;
             }
@@ -1499,6 +1655,33 @@ impl TunerApp {
             })
             .unwrap_or((0, 0.0));
         ui.add_space(30.0);
+        if self.strip_pass() == StripPass::Pitch {
+            ui.heading(
+                RichText::new(self.t("¡Primera pasada lista!", "First pass done!"))
+                    .size(36.0)
+                    .strong(),
+            );
+            ui.label(self.t(
+                "Todas las cuerdas libres están afinadas. Ahora van los unísonos, nota por nota, sacando la tira de a poco.",
+                "Every free string is tuned. Now the unisons, note by note, pulling the strip as you go.",
+            ));
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(self.t("Empezar los unísonos ▶", "Start the unisons ▶"))
+                            .size(19.0)
+                            .strong()
+                            .color(Color32::WHITE),
+                    )
+                    .fill(GREEN)
+                    .min_size(egui::vec2(290.0, 52.0)),
+                )
+                .clicked()
+            {
+                self.start_unison_pass();
+            }
+            return;
+        }
         ui.heading(
             RichText::new(self.t("¡Terminaste!", "All done!"))
                 .size(36.0)
@@ -2092,6 +2275,29 @@ mod tests {
         assert!(wrong_note_hint(f, c, 440.0, 69, Lang::En)
             .unwrap()
             .contains("flat"));
+    }
+
+    #[test]
+    fn strip_passes_split_the_work() {
+        let kinds = |v: Vec<Step>| v.iter().map(|s| s.kind).collect::<Vec<_>>();
+        use StepKind::*;
+        assert_eq!(kinds(strip_steps(3, StripPass::Pitch, false)), vec![Pitch]);
+        assert_eq!(
+            kinds(strip_steps(3, StripPass::Pitch, true)),
+            vec![Mute, Pitch]
+        );
+        assert!(strip_steps(1, StripPass::Unisons, false).is_empty());
+        assert_eq!(
+            kinds(strip_steps(2, StripPass::Unisons, false)),
+            vec![Unison]
+        );
+        assert_eq!(
+            kinds(strip_steps(3, StripPass::Unisons, false)),
+            vec![Unison, Unison]
+        );
+        // sin tira: 3 cuerdas con recordatorio = 4 pasos
+        assert_eq!(steps_for(3, true).len(), 4);
+        assert_eq!(steps_for(3, false).len(), 3);
     }
 
     #[test]
