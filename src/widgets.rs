@@ -357,3 +357,76 @@ pub fn strobe(ui: &mut egui::Ui, phase: f32, active: bool, in_tune: bool) {
         }
     }
 }
+
+/// Grafico del desvio final de cada nota, alineado con el teclado de 88.
+/// Barras arriba = alta, abajo = baja; verde dentro del margen.
+pub fn deviation_chart(ui: &mut egui::Ui, cents: &HashMap<u8, f32>, tolerance: f32) {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 140.0), Sense::hover());
+    let p = ui.painter_at(rect);
+    let fg = ui.visuals().text_color();
+    p.rect_filled(rect, 6.0, ui.visuals().extreme_bg_color);
+    let range = 20.0f32;
+    let mid = rect.center().y;
+    let y_of = |c: f32| mid - (c.clamp(-range, range) / range) * (rect.height() / 2.0 - 8.0);
+    // zona del margen y lineas guia
+    p.rect_filled(
+        Rect::from_min_max(
+            Pos2::new(rect.left(), y_of(tolerance)),
+            Pos2::new(rect.right(), y_of(-tolerance)),
+        ),
+        0.0,
+        GREEN.gamma_multiply(0.15),
+    );
+    for c in [-20.0f32, -10.0, 0.0, 10.0, 20.0] {
+        let y = y_of(c);
+        p.line_segment(
+            [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+            Stroke::new(if c == 0.0 { 1.5_f32 } else { 0.5 }, fg.gamma_multiply(0.3)),
+        );
+        p.text(
+            Pos2::new(rect.left() + 4.0, y),
+            Align2::LEFT_CENTER,
+            format!("{c:+.0}"),
+            FontId::proportional(10.0),
+            fg.gamma_multiply(0.5),
+        );
+    }
+    let slot = rect.width() / 88.0;
+    for (&midi, &c) in cents {
+        if !(21..=108).contains(&midi) {
+            continue;
+        }
+        let x = rect.left() + (midi - 21) as f32 * slot + slot / 2.0;
+        let color = if c.abs() <= tolerance {
+            GREEN
+        } else if c.abs() <= 15.0 {
+            ORANGE
+        } else {
+            RED
+        };
+        let (a, b) = (y_of(0.0), y_of(c));
+        p.rect_filled(
+            Rect::from_min_max(
+                Pos2::new(x - slot * 0.35, a.min(b)),
+                Pos2::new(x + slot * 0.35, a.max(b).max(a.min(b) + 1.5)),
+            ),
+            1.0,
+            color,
+        );
+    }
+    if let Some(pos) = response.hover_pos() {
+        let midi = 21 + ((pos.x - rect.left()) / slot).floor().clamp(0.0, 87.0) as u8;
+        if let Some(c) = cents.get(&midi) {
+            let name = crate_note_name(midi);
+            response.on_hover_text(format!("{name}: {c:+.1} cents"));
+        }
+    }
+}
+
+fn crate_note_name(midi: u8) -> String {
+    const NAMES: [&str; 12] = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
+    format!("{}{}", NAMES[(midi % 12) as usize], midi as i32 / 12 - 1)
+}

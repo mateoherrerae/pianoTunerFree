@@ -196,6 +196,8 @@ pub struct TunerApp {
     /// Preguntando si borrar la afinacion guardada.
     confirm_restart: bool,
     detect_a4: Option<DetectA4>,
+    /// Resultado del ultimo exportado: (ok, ruta o error).
+    export_msg: Option<(bool, String)>,
     /// Desplazamiento del estroboscopio (px) y ultimo cuadro.
     strobe_phase: f32,
     last_frame: Instant,
@@ -234,6 +236,7 @@ impl TunerApp {
             pitch_cents: None,
             confirm_restart: false,
             detect_a4: None,
+            export_msg: None,
             strobe_phase: 0.0,
             last_frame: Instant::now(),
         };
@@ -1204,6 +1207,10 @@ impl TunerApp {
         );
         let done = self.done_map();
         let clicked = widgets::keyboard(ui, Some(current.midi), &done, string_count);
+        egui::CollapsingHeader::new(self.t("Informe hasta ahora", "Report so far"))
+            .id_salt("report_live")
+            .default_open(false)
+            .show(ui, |ui| self.report(ui));
 
         // Acciones
         let last_cents = self.reading.as_ref().map(|r| r.cents);
@@ -1406,8 +1413,7 @@ impl TunerApp {
             self.t("desvío promedio", "average deviation")
         ));
         ui.add_space(10.0);
-        let done = self.done_map();
-        widgets::keyboard(ui, None, &done, string_count);
+        self.report(ui);
         ui.add_space(10.0);
         if ui
             .button(self.t("Volver al inicio", "Back to home"))
@@ -1415,6 +1421,82 @@ impl TunerApp {
         {
             self.go_home();
         }
+    }
+
+    /// Grafico de desvios + teclado + exportar CSV.
+    fn report(&mut self, ui: &mut egui::Ui) {
+        let cents: HashMap<u8, f32> = self
+            .flow
+            .as_ref()
+            .map(|f| {
+                f.session()
+                    .completed_notes
+                    .iter()
+                    .map(|n| (n.midi, n.final_cents))
+                    .collect()
+            })
+            .unwrap_or_default();
+        widgets::deviation_chart(ui, &cents, self.settings.tolerance);
+        let done = self.done_map();
+        widgets::keyboard(ui, None, &done, string_count);
+        ui.horizontal(|ui| {
+            if ui
+                .button(self.t("📄 Exportar informe (CSV)", "📄 Export report (CSV)"))
+                .on_hover_text(self.t(
+                    "Se guarda en el Escritorio. Se abre con Excel.",
+                    "Saved to the Desktop. Opens in Excel.",
+                ))
+                .clicked()
+            {
+                self.export_msg = Some(match self.export_csv() {
+                    Ok(path) => (true, path),
+                    Err(e) => (false, e.to_string()),
+                });
+            }
+            if let Some((ok, msg)) = &self.export_msg {
+                let color = if *ok { GREEN } else { widgets::RED };
+                ui.label(RichText::new(msg).color(color));
+            }
+        });
+    }
+
+    /// Escribe el informe de la sesion actual en el Escritorio.
+    fn export_csv(&self) -> anyhow::Result<String> {
+        let flow = self
+            .flow
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("sin sesión"))?;
+        let dir = directories::UserDirs::new()
+            .and_then(|u| u.desktop_dir().map(|d| d.to_path_buf()))
+            .or_else(|| std::env::current_dir().ok())
+            .ok_or_else(|| anyhow::anyhow!("sin carpeta"))?;
+        let safe: String = self
+            .settings
+            .piano
+            .name
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+        let stamp = chrono::Local::now().format("%Y-%m-%d_%H%M");
+        let path = dir.join(format!("afinacion_{safe}_{stamp}.csv"));
+        let mut notes = flow.session().completed_notes.clone();
+        notes.sort_by_key(|n| n.midi);
+        let mut out = String::from("nota;midi;cuerdas;objetivo_hz;desvio_cents;fecha\n");
+        for n in &notes {
+            out.push_str(&format!(
+                "{};{};{};{:.2};{:.1};{}\n",
+                n.note,
+                n.midi,
+                string_count(n.midi),
+                flow.target_for_midi(n.midi),
+                n.final_cents,
+                n.timestamp
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+            ));
+        }
+        std::fs::write(&path, out)?;
+        Ok(path.display().to_string())
     }
 
     // ---------------------------------------------------------- Medir piano
