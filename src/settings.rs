@@ -113,6 +113,8 @@ pub struct Settings {
     pub auto_secs: f32,
     /// Segundos que se mantiene la ultima lectura (agudos cortos).
     pub hold_secs: f32,
+    /// Nota de referencia con sonido de piano (si no, tono puro).
+    pub ref_piano: bool,
     /// Microfono elegido (None = el predeterminado de Windows).
     pub mic_device: Option<String>,
 }
@@ -135,6 +137,7 @@ impl Default for Settings {
             tolerance: 5.0,
             auto_secs: 1.0,
             hold_secs: 3.0,
+            ref_piano: true,
             mic_device: None,
         };
         s.apply_level(Level::Basic);

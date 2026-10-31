@@ -198,6 +198,8 @@ pub struct TunerApp {
     detect_a4: Option<DetectA4>,
     /// Resultado del ultimo exportado: (ok, ruta o error).
     export_msg: Option<(bool, String)>,
+    /// No tomar lecturas hasta este momento (suena la referencia).
+    ignore_until: Option<Instant>,
     /// Desplazamiento del estroboscopio (px) y ultimo cuadro.
     strobe_phase: f32,
     last_frame: Instant,
@@ -237,6 +239,7 @@ impl TunerApp {
             confirm_restart: false,
             detect_a4: None,
             export_msg: None,
+            ignore_until: None,
             strobe_phase: 0.0,
             last_frame: Instant::now(),
         };
@@ -297,7 +300,14 @@ impl TunerApp {
             }
         }
         if let Some(out) = &self.output {
-            let _ = out.play_sine(freq, 2.0);
+            out.clear();
+            // El micro escucharia la referencia como "afinada": ignorarlo.
+            self.ignore_until = Some(Instant::now() + Duration::from_millis(2800));
+            let _ = if self.settings.ref_piano {
+                out.play_piano(freq, 2.5)
+            } else {
+                out.play_sine(freq, 2.0)
+            };
         }
     }
 
@@ -370,7 +380,12 @@ impl TunerApp {
             .collect();
         self.beat = beats::analyze(&since_step);
 
-        match worker.latest_update() {
+        let update = worker.latest_update();
+        if self.ignore_until.is_some_and(|t| now < t) {
+            self.beat = None;
+            return;
+        }
+        match update {
             Some(PitchUpdate::Detected {
                 frequency,
                 confidence,
@@ -1096,12 +1111,20 @@ impl TunerApp {
                 ));
             });
             ui.add_space(30.0);
-            if ui
-                .button(self.t("🔊 Escuchar la nota", "🔊 Play the note"))
-                .clicked()
-            {
-                self.play_reference(current.target_freq);
-            }
+            ui.vertical(|ui| {
+                if ui
+                    .button(self.t("🔊 Escuchar la nota  (R)", "🔊 Play the note  (R)"))
+                    .clicked()
+                    || ui.input(|i| i.key_pressed(egui::Key::R))
+                {
+                    self.play_reference(current.target_freq);
+                }
+                let label = self.t(
+                    "Sonido de piano (si no, tono puro)",
+                    "Piano sound (else pure tone)",
+                );
+                ui.checkbox(&mut self.settings.ref_piano, label);
+            });
         });
 
         // Pasos

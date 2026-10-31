@@ -481,6 +481,20 @@ impl AudioOutput {
         self.sample_rate
     }
 
+    /// Drop anything still queued (so a new tone starts right away).
+    pub fn clear(&self) {
+        self.buffer.lock().unwrap().clear();
+    }
+
+    /// Play a piano-like tone: a few overtones with a natural decay. Easier
+    /// to hear than a sine on small speakers, especially in the bass.
+    pub fn play_piano(&self, frequency: f32, duration: f32) -> anyhow::Result<()> {
+        let sr = self.sample_rate as f32;
+        let samples = piano_tone(frequency, duration, sr);
+        self.queue(&samples);
+        Ok(())
+    }
+
     /// Play a sine wave at the given frequency for the given duration.
     pub fn play_sine(&self, frequency: f32, duration: f32) -> anyhow::Result<()> {
         let num_samples = (self.sample_rate as f32 * duration) as usize;
@@ -497,9 +511,46 @@ impl AudioOutput {
     }
 }
 
+/// Muestras de un tono tipo piano (armonicos 1..8 con caida exponencial).
+pub fn piano_tone(frequency: f32, duration: f32, sample_rate: f32) -> Vec<f32> {
+    let n = (sample_rate * duration) as usize;
+    // Los graves suenan mas tiempo.
+    let tau = (2.5 * (110.0 / frequency.max(20.0)).powf(0.4)).clamp(0.4, 3.0);
+    let partials: Vec<(f32, f32)> = (1..=8)
+        .map(|k| (k as f32, 1.0 / (k as f32).powf(1.3)))
+        .filter(|(k, _)| k * frequency < sample_rate * 0.45)
+        .collect();
+    let norm: f32 = partials.iter().map(|p| p.1).sum::<f32>().max(1e-6);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f32 / sample_rate;
+        let attack = (t / 0.005).min(1.0);
+        let release = ((duration - t) / 0.05).clamp(0.0, 1.0);
+        let mut v = 0.0;
+        for (k, a) in &partials {
+            // los armonicos altos se apagan antes
+            v += a
+                * (-t * k.sqrt() / tau).exp()
+                * (2.0 * std::f32::consts::PI * k * frequency * t).sin();
+        }
+        out.push(0.35 * attack * release * v / norm);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn piano_tone_is_bounded_and_has_length() {
+        let s = piano_tone(27.5, 1.0, 48_000.0);
+        assert_eq!(s.len(), 48_000);
+        assert!(s.iter().all(|x| x.abs() <= 0.36));
+        // agudo: sin armonicos por encima de Nyquist
+        let s = piano_tone(4186.0, 0.5, 44_100.0);
+        assert!(s.iter().any(|x| x.abs() > 0.05));
+    }
 
     fn shared_buffer_with_cap(max_samples: usize) -> SharedBuffer {
         SharedBuffer {
