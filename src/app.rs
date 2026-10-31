@@ -405,7 +405,19 @@ impl TunerApp {
                     ),
                     None => {
                         match Temperament::with_a4(self.settings.piano.a4).nearest_note(frequency) {
-                            Some((m, c)) => (c, Some(m)),
+                            Some((m, c)) => {
+                                // Mismo objetivo que la afinacion guiada.
+                                let offset = if self.settings.free_stretch {
+                                    self.settings
+                                        .piano
+                                        .stretch_curve()
+                                        .map(|s| s.offset_cents(m))
+                                        .unwrap_or(0.0)
+                                } else {
+                                    0.0
+                                };
+                                (c - offset, Some(m))
+                            }
                             None => return,
                         }
                     }
@@ -1777,11 +1789,23 @@ impl TunerApp {
     // --------------------------------------------------------- Afinador libre
 
     fn ui_free(&mut self, ui: &mut egui::Ui) {
-        ui.label(format!(
-            "{}   ·   A4 = {:.1} Hz",
-            self.t("Afinador libre", "Free tuner"),
-            self.settings.piano.a4
-        ));
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "{}   ·   A4 = {:.1} Hz   ·",
+                self.t("Afinador libre", "Free tuner"),
+                self.settings.piano.a4
+            ));
+            let label = self.t(
+                "Con el estiramiento de mi piano",
+                "With my piano's stretch",
+            );
+            let hint = self.t(
+                "Prendido: compara contra el mismo objetivo que la afinación guiada. Apagado: temperamento igual puro.",
+                "On: compares against the same target as guided tuning. Off: plain equal temperament.",
+            );
+            ui.checkbox(&mut self.settings.free_stretch, label)
+                .on_hover_text(hint);
+        });
         ui.add_space(16.0);
         let shown = self
             .shown_reading()

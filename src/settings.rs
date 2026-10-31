@@ -113,6 +113,8 @@ pub struct Settings {
     pub auto_secs: f32,
     /// Segundos que se mantiene la ultima lectura (agudos cortos).
     pub hold_secs: f32,
+    /// El afinador libre usa el estiramiento del piano.
+    pub free_stretch: bool,
     /// Nota de referencia con sonido de piano (si no, tono puro).
     pub ref_piano: bool,
     /// Microfono elegido (None = el predeterminado de Windows).
@@ -138,6 +140,7 @@ impl Default for Settings {
             auto_secs: 1.0,
             hold_secs: 3.0,
             ref_piano: true,
+            free_stretch: true,
             mic_device: None,
         };
         s.apply_level(Level::Basic);
