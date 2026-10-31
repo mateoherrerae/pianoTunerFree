@@ -5,6 +5,8 @@ edition = "2021"
 description = "Afinador de piano gratuito y open source con interfaz grafica (basado en pianito)"
 license = "MIT"
 repository = "https://github.com/mateoherrerae/pianoTunerFree"
+keywords = ["piano", "tuner", "tuning", "audio", "music"]
+categories = ["multimedia::audio"]
 
 [[bin]]
 name = "PianoTunerFree"
