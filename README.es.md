@@ -21,6 +21,14 @@ Abrilo con doble clic. Si Windows SmartScreen muestra un aviso, tocá **Más inf
 - **Niveles**: Básico / Intermedio / Avanzado, o activás cada ayuda por separado.
 - **Varios pianos guardados**, elección de micrófono con medidor de volumen y opción de retomar una afinación a la mitad.
 - **Afinador libre** (cromático), teclado de 88 teclas clickeable y tono de referencia.
+- **Detectar el La de tu piano**: tocás el La central y completa los Hz solo; avisa antes de subir mucho la afinación.
+- **Lupa (±10 cents) y estroboscopio** para el ajuste fino.
+- **Aviso de tecla equivocada o armónico** cuando lo que suena no es la nota pedida.
+- **Indicador de lectura estable**: te dice cuándo la aguja se quedó quieta.
+- **Intervalos de control**: batido esperado de 3ras, 4tas, 5tas, 6tas y 8vas contra las notas ya afinadas.
+- **Modo tira de fieltro**: primero todas las cuerdas libres y después los unísonos, como los afinadores.
+- **Informe de afinación**: gráfico de desvíos sobre el teclado y exportar a CSV.
+- **Referencia con sonido de piano** (se escucha hasta en los graves con parlantes de notebook), atajo `R`.
 - Interfaz en **español e inglés**.
 
 ## Consejos de micrófono (notebooks)

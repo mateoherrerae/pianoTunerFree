@@ -21,6 +21,14 @@ Double-click to open. If Windows SmartScreen shows a warning, click **More info 
 - **Levels**: Basic / Intermediate / Advanced, or toggle each assist yourself.
 - **Several saved pianos**, microphone selection with input meter, resume an unfinished tuning.
 - **Free tuner** mode (chromatic), clickable 88-key keyboard, reference tone playback.
+- **Detect your piano's A**: play middle A and the app fills in the pitch; warns before a big pitch raise.
+- **Fine meter (±10 cents) and strobe** display for precise work.
+- **Wrong-key / overtone warning** when what you hear isn't the requested note.
+- **Steady indicator**: tells you when the reading stops moving.
+- **Check intervals**: expected beat rates of 3rds, 4ths, 5ths, 6ths and octaves against already tuned notes.
+- **Felt strip mode**: tune every free string first, then all unisons in a second pass, like pro tuners.
+- **Tuning report**: deviation chart over the keyboard and CSV export.
+- **Piano-like reference tone** (audible even in the bass on laptop speakers), `R` shortcut.
 - **English and Spanish** interface.
 
 ## Microphone tips (laptops)
