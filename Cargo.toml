@@ -1,0 +1,34 @@
+[package]
+name = "piano-tuner-free"
+version = "0.1.0"
+edition = "2021"
+description = "Afinador de piano gratuito y open source con interfaz grafica (basado en pianito)"
+license = "MIT"
+repository = "https://github.com/mateoherrerae/pianoTunerFree"
+
+[[bin]]
+name = "PianoTunerFree"
+path = "src/main.rs"
+
+[dependencies]
+# Motor de audio y afinacion (heredado de pianito)
+cpal = "0.15"
+hound = "3.5"
+rustfft = "6"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+directories = "5"
+anyhow = "1.0"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Interfaz grafica
+eframe = "0.31"
+
+[dev-dependencies]
+tempfile = "3"
+approx = "0.5"
+
+[profile.release]
+lto = "thin"
+strip = true
