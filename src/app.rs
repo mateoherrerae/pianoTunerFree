@@ -182,6 +182,8 @@ pub struct TunerApp {
     measure: Option<Measure>,
     /// Desvio de la cuerda afinada sola (lo que se guarda de la nota).
     pitch_cents: Option<f32>,
+    /// Preguntando si borrar la afinacion guardada.
+    confirm_restart: bool,
 }
 
 impl TunerApp {
@@ -215,6 +217,7 @@ impl TunerApp {
             resumable: Session::load_recent().ok().flatten(),
             measure: None,
             pitch_cents: None,
+            confirm_restart: false,
         };
         app.ensure_mic();
         app
@@ -551,7 +554,11 @@ impl TunerApp {
                 .add(egui::Button::new(RichText::new(start).size(19.0).strong()).min_size(big))
                 .clicked()
             {
-                self.start_tuning();
+                if self.resumable.is_some() {
+                    self.confirm_restart = true;
+                } else {
+                    self.start_tuning();
+                }
             }
             if ui
                 .add(
@@ -565,6 +572,47 @@ impl TunerApp {
                 self.enter(Screen::Free);
             }
         });
+    }
+
+    /// Pregunta antes de borrar una afinacion a medio hacer.
+    fn restart_dialog(&mut self, ctx: &egui::Context) {
+        let (title, body, yes, no) = (
+            self.t("¿Empezar de nuevo?", "Start over?"),
+            self.t(
+                "Se pierde el progreso de la afinación guardada.",
+                "The saved tuning progress will be lost.",
+            ),
+            self.t("Sí, empezar de nuevo", "Yes, start over"),
+            self.t("Cancelar", "Cancel"),
+        );
+        let mut start = false;
+        let mut cancel = false;
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(body);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    start = ui
+                        .add(
+                            egui::Button::new(RichText::new(yes).color(Color32::WHITE))
+                                .fill(widgets::RED),
+                        )
+                        .clicked();
+                    cancel = ui.button(no).clicked();
+                });
+            });
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            cancel = true;
+        }
+        if start {
+            self.confirm_restart = false;
+            self.start_tuning();
+        } else if cancel {
+            self.confirm_restart = false;
+        }
     }
 
     fn section_piano(&mut self, ui: &mut egui::Ui) {
@@ -1481,6 +1529,9 @@ impl eframe::App for TunerApp {
             });
         }
         egui::TopBottomPanel::top("bar").show(ctx, |ui| self.top_bar(ui));
+        if self.confirm_restart {
+            self.restart_dialog(ctx);
+        }
         egui::TopBottomPanel::bottom("footer").show(ctx, |ui| {
             ui.label(
                 RichText::new(self.t(
