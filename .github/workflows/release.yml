@@ -17,7 +17,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Tests
-        run: cargo test --release --lib
+        run: cargo test --release
       - name: Build
         run: cargo build --release
       - name: Subir artefacto

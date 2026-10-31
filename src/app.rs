@@ -1091,6 +1091,13 @@ impl TunerApp {
                     labels,
                 );
                 reading_line(ui, shown, &self.settings);
+                if let Some((cents, freq, true)) = shown {
+                    if let Some(h) = wrong_note_hint(freq, cents, a4, current.midi, lang) {
+                        ui.vertical_centered(|ui| {
+                            ui.label(RichText::new(h).size(17.0).color(ORANGE));
+                        });
+                    }
+                }
             }
         }
         if step.kind == StepKind::Unison && self.settings.show_beats {
@@ -1522,6 +1529,49 @@ impl TunerApp {
     }
 }
 
+/// Aviso cuando lo que suena no es la nota pedida: otra tecla, un armonico
+/// o una cuerda muy lejos (mas de medio tono).
+fn wrong_note_hint(freq: f32, cents: f32, a4: f32, midi: u8, lang: Lang) -> Option<String> {
+    if cents.abs() < 50.0 {
+        return None;
+    }
+    let (heard, _) = Temperament::with_a4(a4).nearest_note(freq)?;
+    let diff = heard as i32 - midi as i32;
+    let name = Note::from_midi(heard)
+        .map(|n| n.display_name())
+        .unwrap_or_default();
+    let es = lang == Lang::Es;
+    Some(if diff != 0 && diff % 12 == 0 {
+        if es {
+            format!("Escucho {name}, una octava distinta. Puede ser un armónico: tocá de nuevo más suave.")
+        } else {
+            format!(
+                "I hear {name}, a different octave. It may be an overtone: play again more gently."
+            )
+        }
+    } else if diff.abs() <= 2 {
+        let semis = (cents / 100.0).abs();
+        match (es, cents < 0.0) {
+            (true, true) => {
+                format!("Muy baja: casi {semis:.1} semitonos. Tensá despacio y en varias vueltas.")
+            }
+            (true, false) => {
+                format!("Muy alta: casi {semis:.1} semitonos. Aflojá un poco y volvé a subir.")
+            }
+            (false, true) => {
+                format!("Very flat: about {semis:.1} semitones. Tighten slowly, in several turns.")
+            }
+            (false, false) => {
+                format!("Very sharp: about {semis:.1} semitones. Loosen a bit, then come back up.")
+            }
+        }
+    } else if es {
+        format!("Suena como {name}. ¿Es la tecla correcta?")
+    } else {
+        format!("Sounds like {name}. Is it the right key?")
+    })
+}
+
 /// Aviso si el piano esta lejos de 440: subirlo mucho de golpe es riesgoso.
 fn pitch_raise_warning(a4: f32, lang: Lang) -> Option<String> {
     let cents = 1200.0 * (a4 / 440.0).log2();
@@ -1665,5 +1715,42 @@ impl eframe::App for TunerApp {
 impl Drop for TunerApp {
     fn drop(&mut self) {
         self.save_session();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hints_wrong_key_and_octave() {
+        let t = Temperament::with_a4(440.0);
+        // en afinacion: sin aviso
+        assert!(wrong_note_hint(440.0, 0.0, 440.0, 69, Lang::En).is_none());
+        // octava arriba
+        let f = t.frequency(81);
+        let c = t.cents_from_target(f, 440.0);
+        assert!(wrong_note_hint(f, c, 440.0, 69, Lang::En)
+            .unwrap()
+            .contains("octave"));
+        // otra tecla (una quinta)
+        let f = t.frequency(76);
+        let c = t.cents_from_target(f, 440.0);
+        assert!(wrong_note_hint(f, c, 440.0, 69, Lang::En)
+            .unwrap()
+            .contains("E5"));
+        // muy baja
+        let f = t.frequency(68);
+        let c = t.cents_from_target(f, 440.0);
+        assert!(wrong_note_hint(f, c, 440.0, 69, Lang::En)
+            .unwrap()
+            .contains("flat"));
+    }
+
+    #[test]
+    fn warns_on_big_pitch_raise() {
+        assert!(pitch_raise_warning(417.0, Lang::Es).is_some());
+        assert!(pitch_raise_warning(440.0, Lang::Es).is_none());
+        assert!(pitch_raise_warning(436.0, Lang::Es).is_none());
     }
 }
