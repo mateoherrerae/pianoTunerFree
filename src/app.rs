@@ -38,7 +38,7 @@ struct Reading {
     at: Instant,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum StepKind {
     /// Apagar cuerdas: no se mide nada.
     Mute,
