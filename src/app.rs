@@ -1044,6 +1044,28 @@ impl TunerApp {
             a4,
             self.settings.piano.name
         ));
+        let done_count = self
+            .flow
+            .as_ref()
+            .map(|f| f.session().completed_notes.len())
+            .unwrap_or(0);
+        let (phase, phase_hint) = phase_text(current.note_index, lang);
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::ProgressBar::new(done_count as f32 / current.total_notes.max(1) as f32)
+                    .desired_width(260.0)
+                    .text(format!(
+                        "{done_count}/{} {}",
+                        current.total_notes,
+                        self.t("afinadas", "tuned")
+                    )),
+            );
+            ui.label(RichText::new(phase).strong().color(widgets::BLUE))
+                .on_hover_text(phase_hint);
+            if self.settings.show_details {
+                ui.label(RichText::new(phase_hint).weak());
+            }
+        });
 
         ui.horizontal(|ui| {
             ui.label(RichText::new(&current.display_name).size(72.0).strong());
@@ -1602,6 +1624,46 @@ fn pitch_raise_warning(a4: f32, lang: Lang) -> Option<String> {
             -cents
         ),
     })
+}
+
+/// Etapa del orden tradicional segun la posicion: nombre y consejo.
+fn phase_text(position: usize, lang: Lang) -> (&'static str, &'static str) {
+    let es = lang == Lang::Es;
+    if position < 13 {
+        if es {
+            (
+                "Octava de temperamento (F3–F4)",
+                "Es la base de todo el piano: tomate tu tiempo y dejala bien pareja.",
+            )
+        } else {
+            (
+                "Temperament octave (F3–F4)",
+                "The foundation of the whole piano: take your time and get it even.",
+            )
+        }
+    } else if position < 56 {
+        if es {
+            (
+                "Subiendo hacia los agudos",
+                "Cada nota se puede chequear con su octava de abajo, ya afinada.",
+            )
+        } else {
+            (
+                "Going up to the treble",
+                "Each note can be checked against the octave below, already tuned.",
+            )
+        }
+    } else if es {
+        (
+            "Bajando hacia los graves",
+            "Cada nota se puede chequear con su octava de arriba, ya afinada.",
+        )
+    } else {
+        (
+            "Going down to the bass",
+            "Each note can be checked against the octave above, already tuned.",
+        )
+    }
 }
 
 fn string_count(midi: u8) -> u8 {
