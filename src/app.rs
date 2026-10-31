@@ -157,6 +157,9 @@ struct DetectA4 {
     started: Instant,
 }
 
+/// Ventana para decidir si la lectura esta quieta.
+const STABLE_WINDOW: Duration = Duration::from_millis(600);
+
 /// Lecturas necesarias para dar el La por detectado.
 const DETECT_READINGS: usize = 12;
 
@@ -203,6 +206,8 @@ pub struct TunerApp {
     /// Desplazamiento del estroboscopio (px) y ultimo cuadro.
     strobe_phase: f32,
     last_frame: Instant,
+    /// Lecturas recientes (para saber si la aguja esta quieta).
+    recent: std::collections::VecDeque<(Instant, f32)>,
 }
 
 impl TunerApp {
@@ -242,6 +247,7 @@ impl TunerApp {
             ignore_until: None,
             strobe_phase: 0.0,
             last_frame: Instant::now(),
+            recent: Default::default(),
         };
         app.ensure_mic();
         app
@@ -404,6 +410,14 @@ impl TunerApp {
                         }
                     }
                 };
+                self.recent.push_back((now, cents));
+                while self
+                    .recent
+                    .front()
+                    .is_some_and(|(t, _)| now.duration_since(*t) > STABLE_WINDOW)
+                {
+                    self.recent.pop_front();
+                }
                 self.reading = Some(Reading {
                     freq: frequency,
                     cents,
@@ -419,6 +433,50 @@ impl TunerApp {
             }
             _ => {}
         }
+    }
+
+    /// Cuanto se mueve la lectura en el ultimo momento (cents de punta a
+    /// punta), o None si hay pocas lecturas.
+    fn spread(&self) -> Option<f32> {
+        let now = Instant::now();
+        let v: Vec<f32> = self
+            .recent
+            .iter()
+            .filter(|(t, _)| now.duration_since(*t) <= STABLE_WINDOW)
+            .map(|r| r.1)
+            .collect();
+        if v.len() < 4 {
+            return None;
+        }
+        let max = v.iter().copied().fold(f32::MIN, f32::max);
+        let min = v.iter().copied().fold(f32::MAX, f32::min);
+        Some(max - min)
+    }
+
+    /// Indicador "estable / moviendose" debajo de la lectura.
+    fn stability_label(&self, ui: &mut egui::Ui) {
+        let Some(spread) = self.spread() else { return };
+        if !self.live {
+            return;
+        }
+        let (text, color) = if spread <= 2.0 {
+            (self.t("● Estable", "● Steady").to_string(), GREEN)
+        } else {
+            (
+                format!(
+                    "● {} (±{:.0} cents)",
+                    self.t(
+                        "Moviéndose: esperá antes de girar",
+                        "Moving: wait before turning"
+                    ),
+                    spread / 2.0
+                ),
+                ORANGE,
+            )
+        };
+        ui.vertical_centered(|ui| {
+            ui.label(RichText::new(text).color(color));
+        });
     }
 
     /// Lectura a mostrar: la actual, o la ultima durante `hold_secs`.
@@ -503,6 +561,7 @@ impl TunerApp {
 
     fn new_step(&mut self) {
         self.reading = None;
+        self.recent.clear();
         self.lock_since = None;
         self.beat = None;
         self.step_started = Instant::now();
@@ -1165,6 +1224,9 @@ impl TunerApp {
             _ => {
                 self.meters(ui, shown.map(|s| (s.0, s.2)), labels);
                 reading_line(ui, shown, &self.settings);
+                if step.kind == StepKind::Pitch {
+                    self.stability_label(ui);
+                }
                 if let Some((cents, freq, true)) = shown {
                     if let Some(h) = wrong_note_hint(freq, cents, a4, current.midi, lang) {
                         ui.vertical_centered(|ui| {
@@ -1743,6 +1805,7 @@ impl TunerApp {
         let labels = (self.t("◀ baja", "◀ flat"), self.t("alta ▶", "sharp ▶"));
         self.meters(ui, shown.map(|s| (s.0, s.2)), labels);
         reading_line(ui, shown.map(|s| (s.0, s.1, s.2)), &self.settings);
+        self.stability_label(ui);
         ui.add_space(14.0);
         widgets::keyboard(ui, note.map(|n| n.midi), &HashMap::new(), string_count);
     }
