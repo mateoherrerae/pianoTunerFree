@@ -9,7 +9,11 @@ fn main() -> eframe::Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Piano Tuner Free")
             .with_inner_size([1100.0, 760.0])
-            .with_min_inner_size([760.0, 560.0]),
+            .with_min_inner_size([760.0, 560.0])
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
+                    .unwrap_or_default(),
+            ),
         ..Default::default()
     };
     eframe::run_native(
