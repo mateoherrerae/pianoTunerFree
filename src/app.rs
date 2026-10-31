@@ -149,6 +149,16 @@ fn steps_for(strings: u8, remind_mute: bool) -> Vec<Step> {
 /// Teclas que se tocan para medir el piano (repartidas por el teclado).
 const MEASURE_KEYS: [u8; 10] = [33, 45, 52, 57, 64, 69, 76, 81, 88, 93];
 
+/// Escucha del La del piano para completar A4 solo.
+struct DetectA4 {
+    freqs: Vec<f32>,
+    last: Option<Instant>,
+    started: Instant,
+}
+
+/// Lecturas necesarias para dar el La por detectado.
+const DETECT_READINGS: usize = 12;
+
 /// Estado de la medicion del piano.
 struct Measure {
     profile: PianoProfile,
@@ -184,6 +194,7 @@ pub struct TunerApp {
     pitch_cents: Option<f32>,
     /// Preguntando si borrar la afinacion guardada.
     confirm_restart: bool,
+    detect_a4: Option<DetectA4>,
 }
 
 impl TunerApp {
@@ -218,6 +229,7 @@ impl TunerApp {
             measure: None,
             pitch_cents: None,
             confirm_restart: false,
+            detect_a4: None,
         };
         app.ensure_mic();
         app
@@ -289,7 +301,33 @@ impl TunerApp {
                 let midi = *MEASURE_KEYS.get(m.index)?;
                 Some(Temperament::with_a4(self.settings.piano.a4).frequency(midi))
             }
+            Screen::Home if self.detect_a4.is_some() => Some(440.0),
             _ => None,
+        }
+    }
+
+    /// Junta lecturas del La y, con suficientes, completa A4 con la mediana.
+    fn update_detect_a4(&mut self) {
+        let Some(d) = self.detect_a4.as_mut() else {
+            return;
+        };
+        if d.started.elapsed() > Duration::from_secs(30) {
+            self.detect_a4 = None;
+            return;
+        }
+        if let Some(r) = &self.reading {
+            let new = d.last != Some(r.at);
+            if new && self.live && r.confidence > 0.8 && (380.0..=480.0).contains(&r.freq) {
+                d.freqs.push(r.freq);
+                d.last = Some(r.at);
+            }
+        }
+        if d.freqs.len() >= DETECT_READINGS {
+            let mut v = d.freqs.clone();
+            v.sort_by(f32::total_cmp);
+            let median = v[v.len() / 2];
+            self.settings.piano.a4 = (median * 10.0).round() / 10.0;
+            self.detect_a4 = None;
         }
     }
 
@@ -510,6 +548,7 @@ impl TunerApp {
         ));
         ui.add_space(8.0);
 
+        self.update_detect_a4();
         self.section_piano(ui);
         self.section_help(ui);
         self.section_mic(ui);
@@ -697,6 +736,18 @@ impl TunerApp {
                 );
                 let measured_ok = self.settings.piano.measured.is_some();
                 let mut measure = false;
+                let s = &self.settings;
+                let detect_l = (
+                    s.t("🎤 Detectar de mi piano", "🎤 Detect from my piano"),
+                    s.t(
+                        "Tocá el La central (A4) varias veces y se completa solo.",
+                        "Play middle A (A4) a few times and it fills in by itself.",
+                    ),
+                    s.t("Tocá el La central…", "Play middle A…"),
+                    s.t("Cancelar", "Cancel"),
+                );
+                let mut cancel_detect = false;
+                let pitch_warning = pitch_raise_warning(s.piano.a4, s.lang);
                 egui::Grid::new("piano_grid")
                     .num_columns(2)
                     .spacing([24.0, 10.0])
@@ -715,7 +766,39 @@ impl TunerApp {
                                     self.settings.piano.a4 = v;
                                 }
                             }
+                            match &self.detect_a4 {
+                                None => {
+                                    if ui.button(detect_l.0).on_hover_text(detect_l.1).clicked() {
+                                        self.detect_a4 = Some(DetectA4 {
+                                            freqs: Vec::new(),
+                                            last: None,
+                                            started: Instant::now(),
+                                        });
+                                    }
+                                }
+                                Some(d) => {
+                                    ui.spinner();
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} ({}/{DETECT_READINGS})",
+                                            detect_l.2,
+                                            d.freqs.len()
+                                        ))
+                                        .color(widgets::BLUE),
+                                    );
+                                    if ui.button(detect_l.3).clicked() {
+                                        cancel_detect = true;
+                                    }
+                                }
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("");
+                        ui.vertical(|ui| {
                             ui.label(RichText::new(labels.1).weak());
+                            if let Some(w) = &pitch_warning {
+                                ui.label(RichText::new(w).color(ORANGE));
+                            }
                         });
                         ui.end_row();
 
@@ -753,6 +836,9 @@ impl TunerApp {
                     });
                 if measure {
                     self.start_measure();
+                }
+                if cancel_detect {
+                    self.detect_a4 = None;
                 }
 
                 ui.add_space(6.0);
@@ -1434,6 +1520,24 @@ impl TunerApp {
         ui.add_space(14.0);
         widgets::keyboard(ui, note.map(|n| n.midi), &HashMap::new(), string_count);
     }
+}
+
+/// Aviso si el piano esta lejos de 440: subirlo mucho de golpe es riesgoso.
+fn pitch_raise_warning(a4: f32, lang: Lang) -> Option<String> {
+    let cents = 1200.0 * (a4 / 440.0).log2();
+    if cents > -20.0 {
+        return None;
+    }
+    Some(match lang {
+        Lang::Es => format!(
+            "Tu piano está {:.0} cents abajo de 440. Afinarlo donde está es lo más seguro.              Para subirlo a 440 conviene ir de a poco (ej. dos pasadas, primero a la mitad):              subir mucho de golpe puede romper cuerdas viejas.",
+            -cents
+        ),
+        Lang::En => format!(
+            "Your piano is {:.0} cents below 440. Tuning it where it is is safest.              To bring it to 440, go in steps (e.g. two passes, halfway first):              a big raise at once can break old strings.",
+            -cents
+        ),
+    })
 }
 
 fn string_count(midi: u8) -> u8 {
