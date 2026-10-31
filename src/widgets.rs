@@ -4,6 +4,9 @@ use std::collections::HashMap;
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
+/// Clave en la memoria de egui con el idioma (true = espanol).
+pub const LANG_ES_ID: &str = "lang_es";
+
 pub const GREEN: Color32 = Color32::from_rgb(46, 170, 90);
 pub const BLUE: Color32 = Color32::from_rgb(60, 130, 230);
 pub const ORANGE: Color32 = Color32::from_rgb(230, 140, 40);
@@ -208,18 +211,43 @@ pub fn keyboard(
         p.rect_filled(*r, 2.0, fill(*midi, true));
     }
 
-    if response.clicked() {
-        if let Some(pos) = response.interact_pointer_pos() {
-            if let Some((m, _)) = blacks.iter().find(|(_, r)| r.contains(pos)) {
-                return Some(*m);
-            }
-            if let Some((m, _)) = whites
-                .iter()
-                .find(|(_, r)| r.left() <= pos.x && pos.x < r.right())
-            {
-                return Some(*m);
-            }
+    let key_at = |pos: Pos2| -> Option<u8> {
+        if !rect.contains(pos) {
+            return None;
         }
+        if let Some((m, _)) = blacks.iter().find(|(_, r)| r.contains(pos)) {
+            return Some(*m);
+        }
+        whites
+            .iter()
+            .find(|(_, r)| r.left() <= pos.x && pos.x < r.right())
+            .map(|(m, _)| *m)
+    };
+
+    if let Some(m) = response.hover_pos().and_then(key_at) {
+        let strings = string_count(m);
+        let status = match done.get(&m) {
+            Some(true) => " ✔",
+            Some(false) => " ⚠",
+            None => "",
+        };
+        let es = ui
+            .ctx()
+            .data(|d| d.get_temp::<bool>(egui::Id::new(LANG_ES_ID)))
+            .unwrap_or(true);
+        let word = match (es, strings) {
+            (true, 1) => "cuerda",
+            (true, _) => "cuerdas",
+            (false, 1) => "string",
+            (false, _) => "strings",
+        };
+        response.clone().on_hover_text(format!(
+            "{}  ·  {strings} {word}{status}",
+            crate_note_name(m),
+        ));
+    }
+    if response.clicked() {
+        return response.interact_pointer_pos().and_then(key_at);
     }
     None
 }

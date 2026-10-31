@@ -2199,6 +2199,8 @@ impl eframe::App for TunerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_audio();
         self.advance_strobe();
+        let es = self.settings.lang == Lang::Es;
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(widgets::LANG_ES_ID), es));
         ctx.request_repaint_after(Duration::from_millis(30));
 
         if let Some(err) = self.audio_error.clone() {
