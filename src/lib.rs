@@ -5,5 +5,6 @@
 
 pub mod audio;
 pub mod beats;
+pub mod intervals;
 pub mod settings;
 pub mod tuning;

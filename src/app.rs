@@ -10,6 +10,7 @@ use piano_tuner_free::audio::{
     AudioOutput, AudioSource, MicCapture, PartialAnalyzer, PitchDetector, PitchUpdate, PitchWorker,
 };
 use piano_tuner_free::beats::{self, BeatInfo};
+use piano_tuner_free::intervals;
 use piano_tuner_free::settings::{Lang, Level, PianoConfig, Settings, StretchSel};
 use piano_tuner_free::tuning::inharmonicity::stretch_from_profile;
 use piano_tuner_free::tuning::{
@@ -929,6 +930,10 @@ impl TunerApp {
                 "Elegí un nivel arriba o tocá cada opción a tu gusto (queda en «Personalizado»).",
                 "Pick a level at the top or adjust each option (becomes \"Custom\").",
             ),
+            s.t(
+                "Intervalos de control con su batido esperado (afinadores)",
+                "Check intervals with their expected beat rate (for tuners)",
+            ),
         );
         egui::CollapsingHeader::new(RichText::new(title).size(20.0).strong())
             .id_salt("help")
@@ -943,6 +948,7 @@ impl TunerApp {
                 ui.checkbox(&mut self.settings.show_beats, l.4);
                 ui.checkbox(&mut self.settings.fine_meter, l.6);
                 ui.checkbox(&mut self.settings.strobe, l.7);
+                ui.checkbox(&mut self.settings.show_intervals, l.11);
                 egui::Grid::new("help_grid")
                     .num_columns(2)
                     .spacing([24.0, 8.0])
@@ -1145,6 +1151,9 @@ impl TunerApp {
         if step.kind == StepKind::Unison && self.settings.show_beats {
             self.beat_panel(ui);
         }
+        if step.kind == StepKind::Pitch && self.settings.show_intervals {
+            self.interval_panel(ui, current.midi);
+        }
 
         let auto = self.auto_progress(step.kind);
         if let Some(p) = auto {
@@ -1235,6 +1244,75 @@ impl TunerApp {
         } else if changed_step {
             self.new_step();
         }
+    }
+
+    /// Intervalos con notas ya afinadas y su batido esperado.
+    fn interval_panel(&self, ui: &mut egui::Ui, midi: u8) {
+        let Some(flow) = &self.flow else { return };
+        let done = self.done_map();
+        let checks =
+            intervals::checks(midi, |m| done.contains_key(&m), |m| flow.target_for_midi(m));
+        if checks.is_empty() {
+            return;
+        }
+        let es = self.settings.lang == Lang::Es;
+        egui::CollapsingHeader::new(
+            RichText::new(self.t(
+                "Intervalos de control (tocá las dos teclas juntas)",
+                "Check intervals (play both keys together)",
+            ))
+            .strong(),
+        )
+        .id_salt("intervals")
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::Grid::new("intervals_grid")
+                .num_columns(3)
+                .spacing([20.0, 4.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    for c in &checks {
+                        let other = Note::from_midi(c.other)
+                            .map(|n| n.display_name())
+                            .unwrap_or_default();
+                        let dir = match (c.other_below, es) {
+                            (true, true) => "abajo",
+                            (false, true) => "arriba",
+                            (true, false) => "below",
+                            (false, false) => "above",
+                        };
+                        ui.label(format!("{} {dir}: {other}", c.interval.name(es)));
+                        ui.label(
+                            RichText::new(format!(
+                                "≈ {:.1} {}",
+                                c.beats,
+                                self.t("batidos/s", "beats/s")
+                            ))
+                            .strong(),
+                        );
+                        ui.label(
+                            RichText::new(if c.beats < 0.3 {
+                                self.t("casi sin batido", "almost beatless")
+                            } else if c.wide {
+                                self.t("ancha", "wide")
+                            } else {
+                                self.t("angosta", "narrow")
+                            })
+                            .weak(),
+                        );
+                        ui.end_row();
+                    }
+                });
+            if self.settings.show_details {
+                ui.label(
+                    RichText::new(self.t(
+                        "Si el batido que escuchás es mucho más rápido o más lento que el esperado, revisá la nota. Las terceras tienen que acelerar parejo al subir.",
+                        "If the beat you hear is much faster or slower than expected, recheck the note. Thirds should speed up evenly as you go up.",
+                    ))
+                    .weak(),
+                );
+            }
+        });
     }
 
     /// Medidor de batido para los unisonos.

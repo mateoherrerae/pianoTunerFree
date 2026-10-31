@@ -105,6 +105,8 @@ pub struct Settings {
     pub fine_meter: bool,
     /// Mostrar el estroboscopio.
     pub strobe: bool,
+    /// Mostrar intervalos de control con su batido esperado.
+    pub show_intervals: bool,
     /// Margen en cents para dar una nota por afinada.
     pub tolerance: f32,
     /// Segundos estable antes de avanzar solo.
@@ -129,6 +131,7 @@ impl Default for Settings {
             show_beats: true,
             fine_meter: true,
             strobe: false,
+            show_intervals: false,
             tolerance: 5.0,
             auto_secs: 1.0,
             hold_secs: 3.0,
@@ -209,11 +212,13 @@ impl Settings {
         self.show_beats = true;
         self.fine_meter = true;
         self.strobe = strobe;
+        self.show_intervals = level == Level::Advanced;
         self.tolerance = tol;
     }
 
     /// Las opciones que define un nivel (para saber si se toco alguna).
-    pub fn assists(&self) -> (bool, bool, bool, bool, bool, bool, bool, f32) {
+    #[allow(clippy::type_complexity)]
+    pub fn assists(&self) -> (bool, bool, bool, bool, bool, bool, bool, bool, f32) {
         (
             self.remind_mute,
             self.show_details,
@@ -222,6 +227,7 @@ impl Settings {
             self.show_beats,
             self.fine_meter,
             self.strobe,
+            self.show_intervals,
             self.tolerance,
         )
     }
