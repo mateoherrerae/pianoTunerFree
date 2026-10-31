@@ -6,9 +6,10 @@
 //! dedicated thread that runs at its own pace; the render loop reads
 //! whatever the worker most recently produced and ticks independently.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -51,6 +52,9 @@ const SILENCE_TIMEOUT: Duration = Duration::from_millis(120);
 /// polls the mic's ring buffer instead of busy-waiting a full core while
 /// idle between strikes.
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(3);
+
+/// How much loudness history to keep for beat detection.
+const ENVELOPE_SPAN: Duration = Duration::from_secs(5);
 
 /// Debounces a raw stream of per-frame detection outcomes into "genuine
 /// silence" events. `observe_*` takes `now` explicitly (rather than calling
@@ -129,6 +133,10 @@ pub struct PitchWorker {
     /// preserved untouched - `Silence` fires once and can't feed a
     /// continuous watchdog without false-positiving a resting mic.
     signal: Arc<AtomicBool>,
+    /// Input level of the newest audio, in dBFS (f32 bits).
+    level: Arc<AtomicU32>,
+    /// Recent loudness envelope `(time, rms)` for beat detection.
+    envelope: Arc<Mutex<VecDeque<(Instant, f32)>>>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -150,6 +158,11 @@ impl PitchWorker {
         // can't trigger a spurious hint inside the timeout window.
         let signal = Arc::new(AtomicBool::new(false));
         let signal_thread = Arc::clone(&signal);
+        let level = Arc::new(AtomicU32::new((-120.0f32).to_bits()));
+        let level_thread = Arc::clone(&level);
+        let envelope = Arc::new(Mutex::new(VecDeque::new()));
+        let envelope_thread = Arc::clone(&envelope);
+        let env_len = (sample_rate as usize / 50).max(1); // 20 ms
 
         let handle = thread::spawn(move || {
             let detector = PitchDetector::new(sample_rate);
@@ -181,6 +194,21 @@ impl PitchWorker {
                 }
 
                 let slice = &audio_buffer[..read];
+                {
+                    let tail = &slice[read.saturating_sub(env_len)..];
+                    let rms = (tail.iter().map(|x| x * x).sum::<f32>() / tail.len() as f32).sqrt();
+                    let db = 20.0 * rms.max(1e-6).log10();
+                    level_thread.store(db.to_bits(), Ordering::Relaxed);
+                    let now = Instant::now();
+                    let mut env = envelope_thread.lock().unwrap();
+                    env.push_back((now, rms));
+                    while env
+                        .front()
+                        .is_some_and(|(t, _)| now.duration_since(*t) > ENVELOPE_SPAN)
+                    {
+                        env.pop_front();
+                    }
+                }
                 // Report whether this read carried real signal, for the
                 // render loop's silence watchdog (issue #34). Separate from
                 // detection below: signal can be present with no confident
@@ -218,6 +246,8 @@ impl PitchWorker {
             target_tx,
             running,
             signal,
+            level,
+            envelope,
             handle: Some(handle),
         }
     }
@@ -246,6 +276,16 @@ impl PitchWorker {
     /// only exact-zero frames (a dead but error-free input).
     pub fn has_signal(&self) -> bool {
         self.signal.load(Ordering::Relaxed)
+    }
+
+    /// Input level of the newest audio, in dBFS (-120 = silence, 0 = max).
+    pub fn level_db(&self) -> f32 {
+        f32::from_bits(self.level.load(Ordering::Relaxed))
+    }
+
+    /// Snapshot of the recent loudness envelope `(time, rms)`.
+    pub fn envelope(&self) -> Vec<(Instant, f32)> {
+        self.envelope.lock().unwrap().iter().copied().collect()
     }
 }
 

@@ -185,11 +185,33 @@ pub struct MicCapture {
 impl MicCapture {
     /// Create a new microphone capture instance.
     pub fn new() -> Result<Self, CaptureError> {
+        Self::with_device(None)
+    }
+
+    /// Names of the available input devices (microphones).
+    pub fn input_device_names() -> Vec<String> {
+        let host = cpal::default_host();
+        host.input_devices()
+            .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Open a specific input device by name, or the system default when
+    /// `name` is `None` or no device with that name exists.
+    pub fn with_device(name: Option<&str>) -> Result<Self, CaptureError> {
         let host = cpal::default_host();
 
-        let device = host
-            .default_input_device()
-            .ok_or(CaptureError::NoInputDevice)?;
+        let named = name.and_then(|wanted| {
+            host.input_devices()
+                .ok()?
+                .find(|d| d.name().map(|n| n == wanted).unwrap_or(false))
+        });
+        let device = match named {
+            Some(d) => d,
+            None => host
+                .default_input_device()
+                .ok_or(CaptureError::NoInputDevice)?,
+        };
 
         let config = device.default_input_config()?;
         let sample_rate = config.sample_rate().0;

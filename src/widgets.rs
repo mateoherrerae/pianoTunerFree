@@ -223,3 +223,28 @@ pub fn keyboard(
     }
     None
 }
+
+/// Curva de volumen (dB) de los ultimos segundos: en un unisono
+/// desafinado se ve ondular ("uaua").
+pub fn envelope_plot(ui: &mut egui::Ui, pts: &[(f32, f32)], color: Color32) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 70.0), Sense::hover());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 6.0, ui.visuals().extreme_bg_color);
+    if pts.len() < 2 {
+        return;
+    }
+    let t_end = pts.last().map(|x| x.0).unwrap_or(0.0);
+    let t_start = t_end - 3.0;
+    let (lo, hi) = (-70.0f32, 0.0f32);
+    let line: Vec<Pos2> = pts
+        .iter()
+        .filter(|(t, _)| *t >= t_start)
+        .map(|(t, db)| {
+            let x = rect.left() + (t - t_start) / 3.0 * rect.width();
+            let y = rect.bottom() - ((db.clamp(lo, hi) - lo) / (hi - lo)) * rect.height();
+            Pos2::new(x, y)
+        })
+        .collect();
+    p.add(egui::Shape::line(line, Stroke::new(2.0_f32, color)));
+}

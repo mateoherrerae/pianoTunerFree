@@ -1,31 +1,39 @@
-//! Ventana principal: ajustes, afinacion guiada y afinador libre.
+//! Ventana principal: ajustes, afinacion guiada, medicion del piano y
+//! afinador libre.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText};
 
-use piano_tuner_free::audio::{AudioOutput, MicCapture, PitchUpdate, PitchWorker};
-use piano_tuner_free::settings::{Lang, Mode, Settings};
+use piano_tuner_free::audio::{
+    AudioOutput, AudioSource, MicCapture, PartialAnalyzer, PitchDetector, PitchUpdate, PitchWorker,
+};
+use piano_tuner_free::beats::{self, BeatInfo};
+use piano_tuner_free::settings::{Lang, Level, PianoConfig, Settings, StretchSel};
+use piano_tuner_free::tuning::inharmonicity::stretch_from_profile;
 use piano_tuner_free::tuning::{
-    Note, Session, StretchCurve, Temperament, TuningFlow, TuningMode, TuningOrder,
+    Note, PianoProfile, Session, Temperament, TuningFlow, TuningMode, TuningOrder,
 };
 
-use crate::widgets::{self, solfege, strings_color, GREEN};
+use crate::widgets::{self, solfege, strings_color, GREEN, ORANGE};
 
 #[derive(PartialEq)]
 enum Screen {
     Home,
     Tuning,
     Free,
+    Measure,
 }
 
 /// Ultima lectura del microfono.
 struct Reading {
     freq: f32,
     cents: f32,
+    confidence: f32,
     /// Nota detectada (solo en el afinador libre).
     midi: Option<u8>,
+    samples: Vec<f32>,
     at: Instant,
 }
 
@@ -35,129 +43,121 @@ enum StepKind {
     Mute,
     /// Afinar una cuerda sola contra el objetivo (las demas apagadas).
     Pitch,
-    /// Igualar una cuerda con las ya afinadas (unisono, de oido).
+    /// Igualar una cuerda con las ya afinadas (unisono).
     Unison,
 }
+
+type Text = (&'static str, &'static str);
 
 /// Un paso de afinacion de una nota.
 struct Step {
     kind: StepKind,
-    title: (&'static str, &'static str),
-    detail: (&'static str, &'static str),
+    title: Text,
+    detail: Text,
 }
 
-const fn step(
-    kind: StepKind,
-    title: (&'static str, &'static str),
-    detail: (&'static str, &'static str),
-) -> Step {
-    Step {
+fn steps_for(strings: u8, remind_mute: bool) -> Vec<Step> {
+    let s = |kind, title, detail| Step {
         kind,
         title,
         detail,
+    };
+    use StepKind::*;
+    let tune_hint = (
+        "Tocá la tecla y girá la clavija hasta que la barra quede en la zona verde.",
+        "Play the key and turn the pin until the bar sits in the green zone.",
+    );
+    match strings {
+        1 => vec![s(Pitch, ("Afiná la cuerda", "Tune the string"), tune_hint)],
+        2 => {
+            let mut v = Vec::new();
+            if remind_mute {
+                v.push(s(
+                    Mute,
+                    ("Apagá la cuerda derecha", "Mute the right string"),
+                    (
+                        "Poné una cuña de goma o fieltro para que suene solo la izquierda. Cuando esté, apretá «Listo».",
+                        "Insert a rubber or felt wedge so only the left string sounds. Then press \"Done\".",
+                    ),
+                ));
+                v.push(s(
+                    Pitch,
+                    ("Afiná la cuerda izquierda", "Tune the left string"),
+                    tune_hint,
+                ));
+            } else {
+                v.push(s(
+                    Pitch,
+                    ("Izquierda (derecha apagada)", "Left (right muted)"),
+                    tune_hint,
+                ));
+            }
+            v.push(s(
+                Unison,
+                ("Derecha: unísono", "Right: unison"),
+                (
+                    "Sacá la cuña y afiná la derecha hasta que no haya batido (el \"uaua\").",
+                    "Remove the wedge and tune the right string until there are no beats.",
+                ),
+            ));
+            v
+        }
+        _ => {
+            let mut v = Vec::new();
+            if remind_mute {
+                v.push(s(
+                    Mute,
+                    ("Apagá las cuerdas de los costados", "Mute the outer strings"),
+                    (
+                        "Poné fieltro o cuñas para que suene solo la del medio. Cuando esté, apretá «Listo».",
+                        "Use a felt strip or wedges so only the center string sounds. Then press \"Done\".",
+                    ),
+                ));
+                v.push(s(
+                    Pitch,
+                    ("Afiná la cuerda del medio", "Tune the center string"),
+                    tune_hint,
+                ));
+            } else {
+                v.push(s(
+                    Pitch,
+                    ("Medio (costados apagados)", "Center (outer muted)"),
+                    tune_hint,
+                ));
+            }
+            v.push(s(
+                Unison,
+                ("Izquierda: unísono", "Left: unison"),
+                (
+                    "Liberá la izquierda y afinala contra la del medio hasta que no haya batido.",
+                    "Unmute the left string and tune it to the center one until there are no beats.",
+                ),
+            ));
+            v.push(s(
+                Unison,
+                ("Derecha: unísono", "Right: unison"),
+                (
+                    "Liberá la derecha y afinala contra las otras dos hasta que no haya batido.",
+                    "Unmute the right string and tune it to the other two until there are no beats.",
+                ),
+            ));
+            v
+        }
     }
 }
 
-use StepKind::{Mute, Pitch, Unison};
+/// Teclas que se tocan para medir el piano (repartidas por el teclado).
+const MEASURE_KEYS: [u8; 10] = [33, 45, 52, 57, 64, 69, 76, 81, 88, 93];
 
-const ONE: &[Step] = &[step(
-    Pitch,
-    ("Afiná la cuerda", "Tune the string"),
-    (
-        "Tocá la tecla y girá la clavija hasta que la barra quede en la zona verde.",
-        "Play the key and turn the pin until the bar sits in the green zone.",
-    ),
-)];
-
-const TWO_APPRENTICE: &[Step] = &[
-    step(
-        Mute,
-        ("Apagá la cuerda derecha", "Mute the right string"),
-        (
-            "Poné una cuña de goma o fieltro para que suene solo la cuerda izquierda. Cuando esté, apretá «Listo».",
-            "Insert a rubber or felt wedge so only the left string sounds. Then press \"Done\".",
-        ),
-    ),
-    step(
-        Pitch,
-        ("Afiná la cuerda izquierda", "Tune the left string"),
-        (
-            "Tocá la tecla y llevá la barra a la zona verde.",
-            "Play the key and bring the bar into the green zone.",
-        ),
-    ),
-    step(
-        Unison,
-        ("Afiná la cuerda derecha", "Tune the right string"),
-        (
-            "Sacá la cuña. Afiná la derecha hasta que las dos suenen juntas sin batido (el \"uaua\").",
-            "Remove the wedge. Tune the right string until both sound together with no beats.",
-        ),
-    ),
-];
-
-const THREE_APPRENTICE: &[Step] = &[
-    step(
-        Mute,
-        ("Apagá las cuerdas de los costados", "Mute the outer strings"),
-        (
-            "Poné fieltro o cuñas para que suene solo la cuerda del medio. Cuando esté, apretá «Listo».",
-            "Use a felt strip or wedges so only the center string sounds. Then press \"Done\".",
-        ),
-    ),
-    step(
-        Pitch,
-        ("Afiná la cuerda del medio", "Tune the center string"),
-        (
-            "Tocá la tecla y llevá la barra a la zona verde.",
-            "Play the key and bring the bar into the green zone.",
-        ),
-    ),
-    step(
-        Unison,
-        ("Afiná la cuerda izquierda", "Tune the left string"),
-        (
-            "Liberá la izquierda y afinala contra la del medio hasta que no haya batido.",
-            "Unmute the left string and tune it to the center one until there are no beats.",
-        ),
-    ),
-    step(
-        Unison,
-        ("Afiná la cuerda derecha", "Tune the right string"),
-        (
-            "Liberá la derecha y afinala contra las otras dos hasta que no haya batido.",
-            "Unmute the right string and tune it to the other two until there are no beats.",
-        ),
-    ),
-];
-
-const TWO_ADVANCED: &[Step] = &[
-    step(
-        Pitch,
-        ("Izquierda (derecha apagada)", "Left (right muted)"),
-        ("", ""),
-    ),
-    step(Unison, ("Derecha: unísono", "Right: unison"), ("", "")),
-];
-
-const THREE_ADVANCED: &[Step] = &[
-    step(
-        Pitch,
-        ("Medio (costados apagados)", "Center (outer muted)"),
-        ("", ""),
-    ),
-    step(Unison, ("Izquierda: unísono", "Left: unison"), ("", "")),
-    step(Unison, ("Derecha: unísono", "Right: unison"), ("", "")),
-];
-
-fn steps_for(strings: u8, mode: Mode) -> &'static [Step] {
-    match (strings, mode) {
-        (1, _) => ONE,
-        (2, Mode::Apprentice) => TWO_APPRENTICE,
-        (2, Mode::Advanced) => TWO_ADVANCED,
-        (_, Mode::Apprentice) => THREE_APPRENTICE,
-        (_, Mode::Advanced) => THREE_ADVANCED,
-    }
+/// Estado de la medicion del piano.
+struct Measure {
+    profile: PianoProfile,
+    index: usize,
+    /// Teclas medidas: cantidad de armonicos encontrados.
+    done: HashMap<u8, usize>,
+    /// Momento en que se capturo la tecla actual (para pasar a la siguiente).
+    captured_at: Option<Instant>,
+    result: Option<Result<(), String>>,
 }
 
 pub struct TunerApp {
@@ -168,14 +168,18 @@ pub struct TunerApp {
     worker: Option<PitchWorker>,
     output: Option<AudioOutput>,
     audio_error: Option<String>,
+    devices: Vec<String>,
     flow: Option<TuningFlow>,
     step: usize,
+    step_started: Instant,
     reading: Option<Reading>,
     live: bool,
-    /// Desde cuando la nota esta estable en la zona verde (avance automatico).
+    /// Desde cuando se cumple la condicion de avance automatico.
     lock_since: Option<Instant>,
-    /// Sesion sin terminar que se puede retomar.
+    beat: Option<BeatInfo>,
+    envelope_db: Vec<(f32, f32)>,
     resumable: Option<Session>,
+    measure: Option<Measure>,
 }
 
 impl TunerApp {
@@ -189,7 +193,7 @@ impl TunerApp {
 
         let settings = Settings::load();
         settings.apply_string_layout();
-        Self {
+        let mut app = Self {
             saved_settings: settings.clone(),
             settings,
             screen: Screen::Home,
@@ -197,28 +201,37 @@ impl TunerApp {
             worker: None,
             output: None,
             audio_error: None,
+            devices: MicCapture::input_device_names(),
             flow: None,
             step: 0,
+            step_started: Instant::now(),
             reading: None,
             live: false,
             lock_since: None,
+            beat: None,
+            envelope_db: Vec::new(),
             resumable: Session::load_recent().ok().flatten(),
-        }
+            measure: None,
+        };
+        app.ensure_mic();
+        app
     }
 
     fn t(&self, es: &'static str, en: &'static str) -> &'static str {
         self.settings.t(es, en)
     }
 
-    fn pick(&self, pair: (&'static str, &'static str)) -> &'static str {
-        self.settings.t(pair.0, pair.1)
+    fn pick(&self, text: Text) -> &'static str {
+        self.settings.t(text.0, text.1)
     }
+
+    // ------------------------------------------------------------- Audio
 
     fn ensure_mic(&mut self) {
         if self.worker.is_some() {
             return;
         }
-        match MicCapture::new() {
+        match MicCapture::with_device(self.settings.mic_device.as_deref()) {
             Ok(mic) => {
                 self.worker = Some(PitchWorker::spawn(mic.reader()));
                 self.mic = Some(mic);
@@ -234,6 +247,13 @@ impl TunerApp {
                 ))
             }
         }
+    }
+
+    fn restart_mic(&mut self) {
+        self.worker = None;
+        self.mic = None;
+        self.audio_error = None;
+        self.ensure_mic();
     }
 
     fn play_reference(&mut self, freq: f32) {
@@ -254,79 +274,23 @@ impl TunerApp {
         }
     }
 
-    fn stretch(&self) -> Option<StretchCurve> {
-        self.settings.stretch.then(StretchCurve::railsback_default)
-    }
-
-    fn start_tuning(&mut self) {
-        self.settings.apply_string_layout();
-        if let Some(old) = self.resumable.take() {
-            let _ = old.delete();
-        }
-        self.flow = Some(TuningFlow::new(
-            TuningMode::Concert,
-            TuningOrder::new(),
-            Temperament::with_a4(self.settings.a4),
-            self.stretch(),
-        ));
-        self.enter_tuning();
-    }
-
-    fn resume_tuning(&mut self) {
-        let Some(session) = self.resumable.take() else {
-            return;
-        };
-        self.settings.apply_string_layout();
-        let a4 = session.a4_reference;
-        self.flow = Some(TuningFlow::resume(
-            session,
-            TuningOrder::new(),
-            Temperament::with_a4(a4),
-            self.stretch(),
-        ));
-        self.enter_tuning();
-    }
-
-    fn enter_tuning(&mut self) {
-        self.reset_note_state();
-        self.ensure_mic();
-        self.screen = Screen::Tuning;
-    }
-
-    fn go_home(&mut self) {
-        self.save_session();
-        self.resumable = Session::load_recent().ok().flatten();
-        self.screen = Screen::Home;
-    }
-
-    fn start_free(&mut self) {
-        self.reading = None;
-        self.ensure_mic();
-        self.screen = Screen::Free;
-    }
-
-    fn save_session(&self) {
-        if let Some(flow) = &self.flow {
-            let _ = flow.session().save();
-        }
-    }
-
-    fn reset_note_state(&mut self) {
-        self.step = 0;
-        self.reading = None;
-        self.lock_since = None;
-        if let Some(f) = &mut self.flow {
-            f.rearm_beep_latch();
-        }
-    }
-
-    /// Lee el microfono y actualiza la lectura actual.
-    fn poll_audio(&mut self) {
-        let Some(worker) = &self.worker else { return };
-        let target = match (&self.screen, &self.flow) {
-            (Screen::Tuning, Some(flow)) => flow.current_note().map(|n| n.target_freq),
+    /// Frecuencia objetivo segun la pantalla.
+    fn current_target(&self) -> Option<f32> {
+        match self.screen {
+            Screen::Tuning => self.flow.as_ref()?.current_note().map(|n| n.target_freq),
+            Screen::Measure => {
+                let m = self.measure.as_ref()?;
+                let midi = *MEASURE_KEYS.get(m.index)?;
+                Some(Temperament::with_a4(self.settings.piano.a4).frequency(midi))
+            }
             _ => None,
-        };
+        }
+    }
+
+    /// Lee el microfono y actualiza la lectura actual y el batido.
+    fn poll_audio(&mut self) {
+        let target = self.current_target();
+        let Some(worker) = &self.worker else { return };
         worker.set_target(target);
         if let Some(w) = worker.take_audio_warning() {
             self.audio_error = Some(format!(
@@ -334,33 +298,56 @@ impl TunerApp {
                 self.t("Problema con el micrófono", "Microphone problem")
             ));
         }
+
+        // Curva de volumen (para el batido y el dibujo)
+        let env = worker.envelope();
+        let now = Instant::now();
+        self.envelope_db = env
+            .iter()
+            .map(|(t, r)| {
+                (
+                    -(now.duration_since(*t).as_secs_f32()),
+                    20.0 * r.max(1e-6).log10(),
+                )
+            })
+            .collect();
+        let since_step: Vec<_> = env
+            .into_iter()
+            .filter(|(t, _)| *t >= self.step_started)
+            .collect();
+        self.beat = beats::analyze(&since_step);
+
         match worker.latest_update() {
             Some(PitchUpdate::Detected {
                 frequency,
                 confidence,
-                ..
+                samples,
             }) if confidence > 0.6 => {
-                let (cents, midi) = match (target, &self.flow) {
-                    (Some(t), Some(flow)) => (flow.cents_from_target(frequency, t), None),
-                    _ => match Temperament::with_a4(self.settings.a4).nearest_note(frequency) {
-                        Some((m, c)) => (c, Some(m)),
-                        None => return,
-                    },
+                let (cents, midi) = match target {
+                    Some(t) => (
+                        Temperament::with_a4(self.settings.piano.a4)
+                            .cents_from_target(frequency, t),
+                        None,
+                    ),
+                    None => {
+                        match Temperament::with_a4(self.settings.piano.a4).nearest_note(frequency) {
+                            Some((m, c)) => (c, Some(m)),
+                            None => return,
+                        }
+                    }
                 };
                 self.reading = Some(Reading {
                     freq: frequency,
                     cents,
+                    confidence,
                     midi,
-                    at: Instant::now(),
+                    samples,
+                    at: now,
                 });
                 self.live = true;
             }
             Some(PitchUpdate::Silence) => {
                 self.live = false;
-                self.lock_since = None;
-                if let Some(f) = &mut self.flow {
-                    f.rearm_beep_latch();
-                }
             }
             _ => {}
         }
@@ -378,18 +365,96 @@ impl TunerApp {
         }
     }
 
-    /// Progreso (0..1) del avance automatico en el paso actual, si aplica.
-    /// Devuelve `Some(1.0)` cuando hay que avanzar.
-    fn auto_progress(&mut self, kind: StepKind) -> Option<f32> {
-        if !self.settings.auto_advance || kind != StepKind::Pitch {
-            self.lock_since = None;
-            return None;
+    // ------------------------------------------------------------- Sesiones
+
+    fn start_tuning(&mut self) {
+        self.settings.apply_string_layout();
+        if let Some(old) = self.resumable.take() {
+            let _ = old.delete();
         }
-        let in_zone = matches!(
-            self.shown_reading(),
-            Some((r, true)) if r.cents.abs() <= self.settings.tolerance
-        );
-        if !in_zone {
+        self.flow = Some(TuningFlow::new(
+            TuningMode::Concert,
+            TuningOrder::new(),
+            Temperament::with_a4(self.settings.piano.a4),
+            self.settings.piano.stretch_curve(),
+        ));
+        self.enter(Screen::Tuning);
+    }
+
+    fn resume_tuning(&mut self) {
+        let Some(session) = self.resumable.take() else {
+            return;
+        };
+        self.settings.apply_string_layout();
+        let a4 = session.a4_reference;
+        self.flow = Some(TuningFlow::resume(
+            session,
+            TuningOrder::new(),
+            Temperament::with_a4(a4),
+            self.settings.piano.stretch_curve(),
+        ));
+        self.enter(Screen::Tuning);
+    }
+
+    fn start_measure(&mut self) {
+        let mut profile = PianoProfile::new();
+        profile.set_a4_reference(self.settings.piano.a4);
+        self.measure = Some(Measure {
+            profile,
+            index: 0,
+            done: HashMap::new(),
+            captured_at: None,
+            result: None,
+        });
+        self.enter(Screen::Measure);
+    }
+
+    fn enter(&mut self, screen: Screen) {
+        self.reset_note_state();
+        self.ensure_mic();
+        self.screen = screen;
+    }
+
+    fn go_home(&mut self) {
+        self.save_session();
+        self.resumable = Session::load_recent().ok().flatten();
+        self.screen = Screen::Home;
+    }
+
+    fn save_session(&self) {
+        if let Some(flow) = &self.flow {
+            let _ = flow.session().save();
+        }
+    }
+
+    fn reset_note_state(&mut self) {
+        self.step = 0;
+        self.new_step();
+    }
+
+    fn new_step(&mut self) {
+        self.reading = None;
+        self.lock_since = None;
+        self.beat = None;
+        self.step_started = Instant::now();
+    }
+
+    /// Avance automatico: progreso 0..1 (1 = avanzar), o None si no aplica.
+    fn auto_progress(&mut self, kind: StepKind) -> Option<f32> {
+        let ok = match kind {
+            StepKind::Pitch if self.settings.auto_advance => matches!(
+                self.shown_reading(),
+                Some((r, true)) if r.cents.abs() <= self.settings.tolerance
+            ),
+            StepKind::Unison if self.settings.auto_unison => {
+                matches!(self.beat, Some(b) if b.clean && b.analyzed_secs >= 1.5)
+            }
+            _ => {
+                self.lock_since = None;
+                return None;
+            }
+        };
+        if !ok {
             self.lock_since = None;
             return Some(0.0);
         }
@@ -409,19 +474,23 @@ impl TunerApp {
                 ui.selectable_value(&mut self.settings.lang, Lang::En, "English");
                 ui.selectable_value(&mut self.settings.lang, Lang::Es, "Español");
                 ui.add_space(16.0);
-                let advanced = self.t("Avanzado", "Advanced");
-                let apprentice = self.t("Aprendiz", "Apprentice");
-                let before = self.settings.mode;
-                ui.selectable_value(&mut self.settings.mode, Mode::Advanced, advanced);
-                ui.selectable_value(&mut self.settings.mode, Mode::Apprentice, apprentice);
-                ui.label(self.t("Modo:", "Mode:"));
-                if before != self.settings.mode {
-                    self.step = 0;
-                    self.lock_since = None;
+                let before = self.settings.level;
+                let mut level = before;
+                for (l, es, en) in [
+                    (Level::Custom, "Personalizado", "Custom"),
+                    (Level::Advanced, "Avanzado", "Advanced"),
+                    (Level::Intermediate, "Intermedio", "Intermediate"),
+                    (Level::Basic, "Básico", "Basic"),
+                ] {
+                    ui.selectable_value(&mut level, l, self.t(es, en));
+                }
+                ui.label(self.t("Nivel:", "Level:"));
+                if level != before {
+                    self.settings.apply_level(level);
+                    self.reset_note_state();
                 }
             });
         });
-        ui.separator();
     }
 
     // ---------------------------------------------------------------- Inicio
@@ -432,158 +501,26 @@ impl TunerApp {
             "Afinador de piano gratuito. Configurá tu piano y elegí cómo afinar.",
             "Free piano tuner. Set up your piano and choose how to tune.",
         ));
-        ui.add_space(12.0);
+        ui.add_space(8.0);
 
-        let t = |es, en| self.settings.t(es, en);
-        let (
-            l_a4,
-            l_old,
-            l_bi,
-            l_bi_hint,
-            l_tri,
-            l_tol,
-            l_hold,
-            l_hold_hint,
-            l_stretch,
-            l_stretch_hint,
-            l_auto,
-            l_auto_hint,
-        ) = (
-            t("La central (A4)", "Middle A (A4)"),
-            t(
-                "Pianos viejos: dejalo donde está el piano hoy (ej. 417).",
-                "Old pianos: keep it where the piano is today (e.g. 417).",
-            ),
-            t("Empiezan 2 cuerdas en", "2 strings start at"),
-            t(
-                "(antes de esta nota: 1 cuerda)",
-                "(below this note: 1 string)",
-            ),
-            t("Empiezan 3 cuerdas en", "3 strings start at"),
-            t("Margen de afinado", "In-tune margin"),
-            t("Mantener última lectura", "Hold last reading"),
-            t(
-                "Útil para los agudos que se apagan rápido.",
-                "Helps with short treble notes.",
-            ),
-            t("Estiramiento", "Stretch"),
-            t(
-                "Subir un poco los agudos y bajar los graves (como un afinador profesional)",
-                "Slightly raise the treble and lower the bass (like a pro tuner)",
-            ),
-            t("Avance automático", "Auto-advance"),
-            t(
-                "Pasa solo de paso o de nota cuando la cuerda queda estable en verde.",
-                "Moves on by itself when the string stays in the green zone.",
-            ),
-        );
+        self.section_piano(ui);
+        self.section_help(ui);
+        self.section_mic(ui);
 
-        egui::Grid::new("settings")
-            .num_columns(2)
-            .spacing([24.0, 12.0])
-            .show(ui, |ui| {
-                ui.label(RichText::new(l_a4).strong());
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::DragValue::new(&mut self.settings.a4)
-                            .speed(0.1)
-                            .range(380.0..=480.0)
-                            .suffix(" Hz")
-                            .max_decimals(1),
-                    );
-                    for v in [440.0, 442.0, 435.0] {
-                        if ui.button(format!("{v:.0}")).clicked() {
-                            self.settings.a4 = v;
-                        }
-                    }
-                    ui.label(RichText::new(l_old).weak());
-                });
-                ui.end_row();
-
-                ui.label(RichText::new(l_bi).strong());
-                ui.horizontal(|ui| {
-                    note_combo(ui, "bi", &mut self.settings.bichord_from, 22, 107);
-                    ui.label(RichText::new(l_bi_hint).weak());
-                });
-                ui.end_row();
-
-                ui.label(RichText::new(l_tri).strong());
-                let min = self.settings.bichord_from;
-                note_combo(ui, "tri", &mut self.settings.trichord_from, min, 108);
-                ui.end_row();
-
-                ui.label(RichText::new(l_tol).strong());
-                ui.add(
-                    egui::Slider::new(&mut self.settings.tolerance, 1.0..=10.0).suffix(" cents"),
-                );
-                ui.end_row();
-
-                ui.label(RichText::new(l_hold).strong());
-                ui.horizontal(|ui| {
-                    ui.add(egui::Slider::new(&mut self.settings.hold_secs, 0.0..=8.0).suffix(" s"));
-                    ui.label(RichText::new(l_hold_hint).weak());
-                });
-                ui.end_row();
-
-                ui.label(RichText::new(l_auto).strong());
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.settings.auto_advance, "");
-                    ui.add_enabled(
-                        self.settings.auto_advance,
-                        egui::Slider::new(&mut self.settings.auto_secs, 0.3..=3.0).suffix(" s"),
-                    );
-                    ui.label(RichText::new(l_auto_hint).weak());
-                });
-                ui.end_row();
-
-                ui.label(RichText::new(l_stretch).strong());
-                ui.checkbox(&mut self.settings.stretch, l_stretch_hint);
-                ui.end_row();
-            });
-
-        if self.settings.trichord_from < self.settings.bichord_from {
-            self.settings.trichord_from = self.settings.bichord_from;
+        if self.settings.piano.trichord_from < self.settings.piano.bichord_from {
+            self.settings.piano.trichord_from = self.settings.piano.bichord_from;
         }
         self.settings.apply_string_layout();
 
-        ui.add_space(12.0);
-        ui.label(RichText::new(self.t("Cuerdas de tu piano", "Your piano's strings")).strong());
-        widgets::keyboard(ui, None, &HashMap::new(), string_count);
-        ui.horizontal(|ui| {
-            for n in 1..=3u8 {
-                ui.label(RichText::new("■").color(strings_color(n)));
-                ui.label(match (n, self.settings.lang) {
-                    (1, Lang::Es) => "1 cuerda",
-                    (1, Lang::En) => "1 string",
-                    (_, Lang::Es) => {
-                        if n == 2 {
-                            "2 cuerdas"
-                        } else {
-                            "3 cuerdas"
-                        }
-                    }
-                    (_, Lang::En) => {
-                        if n == 2 {
-                            "2 strings"
-                        } else {
-                            "3 strings"
-                        }
-                    }
-                });
-                ui.add_space(10.0);
-            }
-        });
-
-        ui.add_space(18.0);
-        let big = egui::vec2(300.0, 56.0);
-        ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        let big = egui::vec2(290.0, 56.0);
+        ui.horizontal_wrapped(|ui| {
             if let Some(s) = &self.resumable {
                 let label = format!(
-                    "{} ({} {}/88, {:.1} Hz)",
+                    "{} ({} {}/88)",
                     self.t("Continuar afinación", "Resume tuning"),
                     self.t("nota", "note"),
                     s.current_note_index + 1,
-                    s.a4_reference
                 );
                 if ui
                     .add(
@@ -600,7 +537,6 @@ impl TunerApp {
                 {
                     self.resume_tuning();
                 }
-                ui.add_space(12.0);
             }
             let start = if self.resumable.is_some() {
                 self.t("Empezar de nuevo", "Start over")
@@ -613,7 +549,6 @@ impl TunerApp {
             {
                 self.start_tuning();
             }
-            ui.add_space(12.0);
             if ui
                 .add(
                     egui::Button::new(
@@ -623,17 +558,299 @@ impl TunerApp {
                 )
                 .clicked()
             {
-                self.start_free();
+                self.enter(Screen::Free);
             }
         });
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new(self.t(
-                "Modo aprendiz: te recuerda apagar las cuerdas antes de afinar. Modo avanzado: pasos directos, sin recordatorios.",
-                "Apprentice mode reminds you to mute strings first. Advanced mode goes straight to tuning.",
-            ))
-            .weak(),
+    }
+
+    fn section_piano(&mut self, ui: &mut egui::Ui) {
+        let title = self.t("Tu piano", "Your piano");
+        egui::CollapsingHeader::new(RichText::new(title).size(20.0).strong())
+            .id_salt("piano")
+            .default_open(true)
+            .show(ui, |ui| {
+                let s = &self.settings;
+                let (l_name, l_load, l_save, l_new, l_del) = (
+                    s.t("Nombre", "Name"),
+                    s.t("Pianos guardados", "Saved pianos"),
+                    s.t("Guardar", "Save"),
+                    s.t("Nuevo", "New"),
+                    s.t("Borrar", "Delete"),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(l_name);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.settings.piano.name)
+                            .desired_width(180.0),
+                    );
+                    if ui.button(l_save).clicked() {
+                        let p = self.settings.piano.clone();
+                        match self
+                            .settings
+                            .saved_pianos
+                            .iter_mut()
+                            .find(|x| x.name == p.name)
+                        {
+                            Some(x) => *x = p,
+                            None => self.settings.saved_pianos.push(p),
+                        }
+                    }
+                    if ui.button(l_new).clicked() {
+                        self.settings.piano = PianoConfig::default();
+                    }
+                    if !self.settings.saved_pianos.is_empty() {
+                        let mut chosen = None;
+                        egui::ComboBox::from_id_salt("load_piano")
+                            .selected_text(l_load)
+                            .show_ui(ui, |ui| {
+                                for (i, p) in self.settings.saved_pianos.iter().enumerate() {
+                                    if ui
+                                        .selectable_label(
+                                            false,
+                                            format!("{}  ({:.1} Hz)", p.name, p.a4),
+                                        )
+                                        .clicked()
+                                    {
+                                        chosen = Some(i);
+                                    }
+                                }
+                            });
+                        if let Some(i) = chosen {
+                            self.settings.piano = self.settings.saved_pianos[i].clone();
+                        }
+                        let name = self.settings.piano.name.clone();
+                        if self.settings.saved_pianos.iter().any(|p| p.name == name)
+                            && ui.button(l_del).clicked()
+                        {
+                            self.settings.saved_pianos.retain(|p| p.name != name);
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+
+                let s = &self.settings;
+                let labels = (
+                    s.t("La central (A4)", "Middle A (A4)"),
+                    s.t(
+                        "Pianos viejos: dejalo donde está el piano hoy (ej. 417).",
+                        "Old pianos: keep it where the piano is today (e.g. 417).",
+                    ),
+                    s.t("Empiezan 2 cuerdas en", "2 strings start at"),
+                    s.t("Empiezan 3 cuerdas en", "3 strings start at"),
+                    s.t("Estiramiento", "Stretch"),
+                    s.t("Sin estiramiento", "None"),
+                    s.t("Estándar", "Standard"),
+                    s.t("Medido en este piano", "Measured on this piano"),
+                    s.t("Medir mi piano…", "Measure my piano…"),
+                );
+                let measured_ok = self.settings.piano.measured.is_some();
+                let mut measure = false;
+                egui::Grid::new("piano_grid")
+                    .num_columns(2)
+                    .spacing([24.0, 10.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(labels.0).strong());
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut self.settings.piano.a4)
+                                    .speed(0.1)
+                                    .range(380.0..=480.0)
+                                    .suffix(" Hz")
+                                    .max_decimals(1),
+                            );
+                            for v in [440.0, 442.0, 435.0] {
+                                if ui.button(format!("{v:.0}")).clicked() {
+                                    self.settings.piano.a4 = v;
+                                }
+                            }
+                            ui.label(RichText::new(labels.1).weak());
+                        });
+                        ui.end_row();
+
+                        ui.label(RichText::new(labels.2).strong());
+                        note_combo(ui, "bi", &mut self.settings.piano.bichord_from, 22, 107);
+                        ui.end_row();
+
+                        ui.label(RichText::new(labels.3).strong());
+                        let min = self.settings.piano.bichord_from;
+                        note_combo(ui, "tri", &mut self.settings.piano.trichord_from, min, 108);
+                        ui.end_row();
+
+                        ui.label(RichText::new(labels.4).strong());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.selectable_value(
+                                &mut self.settings.piano.stretch,
+                                StretchSel::Off,
+                                labels.5,
+                            );
+                            ui.selectable_value(
+                                &mut self.settings.piano.stretch,
+                                StretchSel::Standard,
+                                labels.6,
+                            );
+                            ui.add_enabled_ui(measured_ok, |ui| {
+                                ui.selectable_value(
+                                    &mut self.settings.piano.stretch,
+                                    StretchSel::Measured,
+                                    labels.7,
+                                );
+                            });
+                            measure = ui.button(labels.8).clicked();
+                        });
+                        ui.end_row();
+                    });
+                if measure {
+                    self.start_measure();
+                }
+
+                ui.add_space(6.0);
+                widgets::keyboard(ui, None, &HashMap::new(), string_count);
+                ui.horizontal(|ui| {
+                    for n in 1..=3u8 {
+                        ui.label(RichText::new("■").color(strings_color(n)));
+                        ui.label(strings_label(n, self.settings.lang));
+                        ui.add_space(10.0);
+                    }
+                });
+            });
+    }
+
+    fn section_help(&mut self, ui: &mut egui::Ui) {
+        let title = self.t("Ayudas", "Assists");
+        let s = &self.settings;
+        let l = (
+            s.t(
+                "Recordarme apagar las cuerdas antes de afinar",
+                "Remind me to mute strings before tuning",
+            ),
+            s.t(
+                "Mostrar explicaciones en cada paso",
+                "Show explanations on each step",
+            ),
+            s.t(
+                "Avanzar solo cuando la cuerda queda en verde",
+                "Auto-advance when the string is in the green zone",
+            ),
+            s.t(
+                "Avanzar solo en los unísonos cuando no hay batido",
+                "Auto-advance unisons when there are no beats",
+            ),
+            s.t(
+                "Mostrar el medidor de batido en los unísonos",
+                "Show the beat meter on unisons",
+            ),
+            s.t("Margen de afinado", "In-tune margin"),
+            s.t(
+                "Tiempo estable para avanzar",
+                "Time stable before advancing",
+            ),
+            s.t(
+                "Mantener última lectura (agudos cortos)",
+                "Hold last reading (short treble)",
+            ),
+            s.t(
+                "Elegí un nivel arriba o tocá cada opción a tu gusto (queda en «Personalizado»).",
+                "Pick a level at the top or adjust each option (becomes \"Custom\").",
+            ),
         );
+        egui::CollapsingHeader::new(RichText::new(title).size(20.0).strong())
+            .id_salt("help")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label(RichText::new(l.8).weak());
+                let before = (
+                    self.settings.remind_mute,
+                    self.settings.show_details,
+                    self.settings.auto_advance,
+                    self.settings.auto_unison,
+                    self.settings.show_beats,
+                    self.settings.tolerance,
+                );
+                ui.checkbox(&mut self.settings.remind_mute, l.0);
+                ui.checkbox(&mut self.settings.show_details, l.1);
+                ui.checkbox(&mut self.settings.auto_advance, l.2);
+                ui.checkbox(&mut self.settings.auto_unison, l.3);
+                ui.checkbox(&mut self.settings.show_beats, l.4);
+                egui::Grid::new("help_grid")
+                    .num_columns(2)
+                    .spacing([24.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label(l.5);
+                        ui.add(
+                            egui::Slider::new(&mut self.settings.tolerance, 1.0..=10.0)
+                                .suffix(" cents"),
+                        );
+                        ui.end_row();
+                        ui.label(l.6);
+                        ui.add(
+                            egui::Slider::new(&mut self.settings.auto_secs, 0.3..=3.0).suffix(" s"),
+                        );
+                        ui.end_row();
+                        ui.label(l.7);
+                        ui.add(
+                            egui::Slider::new(&mut self.settings.hold_secs, 0.0..=8.0).suffix(" s"),
+                        );
+                        ui.end_row();
+                    });
+                let after = (
+                    self.settings.remind_mute,
+                    self.settings.show_details,
+                    self.settings.auto_advance,
+                    self.settings.auto_unison,
+                    self.settings.show_beats,
+                    self.settings.tolerance,
+                );
+                if before != after {
+                    self.settings.level = Level::Custom;
+                }
+            });
+    }
+
+    fn section_mic(&mut self, ui: &mut egui::Ui) {
+        let title = self.t("Micrófono", "Microphone");
+        let default_label = self.t("Predeterminado de Windows", "Windows default");
+        let hint = self.t(
+            "Tocá una tecla: la barra tiene que moverse. Desactivá mejoras y cancelación de ruido del micrófono.",
+            "Play a key: the bar should move. Turn off mic enhancements and noise cancellation.",
+        );
+        egui::CollapsingHeader::new(RichText::new(title).size(20.0).strong())
+            .id_salt("mic")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    let before = self.settings.mic_device.clone();
+                    egui::ComboBox::from_id_salt("mic_dev")
+                        .width(320.0)
+                        .selected_text(
+                            self.settings
+                                .mic_device
+                                .clone()
+                                .unwrap_or(default_label.into()),
+                        )
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.settings.mic_device, None, default_label);
+                            for d in &self.devices {
+                                ui.selectable_value(
+                                    &mut self.settings.mic_device,
+                                    Some(d.clone()),
+                                    d,
+                                );
+                            }
+                        });
+                    if ui
+                        .button("⟳")
+                        .on_hover_text(self.t("Actualizar lista", "Refresh list"))
+                        .clicked()
+                    {
+                        self.devices = MicCapture::input_device_names();
+                    }
+                    if before != self.settings.mic_device {
+                        self.restart_mic();
+                    }
+                });
+                level_bar(ui, self.worker.as_ref().map(|w| w.level_db()));
+                ui.label(RichText::new(hint).weak());
+            });
     }
 
     // ------------------------------------------------------------- Afinacion
@@ -643,22 +860,25 @@ impl TunerApp {
             self.ui_finished(ui);
             return;
         };
-        let steps = steps_for(current.string_count, self.settings.mode);
+        let steps = steps_for(current.string_count, self.settings.remind_mute);
         self.step = self.step.min(steps.len() - 1);
         let step = &steps[self.step];
         let name = Note::from_midi(current.midi).map(|n| n.name).unwrap_or("?");
         let lang = self.settings.lang;
+        let a4 = self
+            .flow
+            .as_ref()
+            .map(|f| f.session().a4_reference)
+            .unwrap_or(self.settings.piano.a4);
 
         ui.label(format!(
-            "{} {} {} {}   ·   A4 = {:.1} Hz",
+            "{} {} {} {}   ·   A4 = {:.1} Hz   ·   {}",
             self.t("Nota", "Note"),
             current.note_index + 1,
             self.t("de", "of"),
             current.total_notes,
-            self.flow
-                .as_ref()
-                .map(|f| f.session().a4_reference)
-                .unwrap_or(self.settings.a4)
+            a4,
+            self.settings.piano.name
         ));
 
         ui.horizontal(|ui| {
@@ -669,14 +889,8 @@ impl TunerApp {
                 if lang == Lang::Es {
                     ui.label(RichText::new(solfege(name)).size(24.0));
                 }
-                let strings = match (current.string_count, lang) {
-                    (1, Lang::Es) => "1 cuerda".to_string(),
-                    (1, Lang::En) => "1 string".to_string(),
-                    (n, Lang::Es) => format!("{n} cuerdas"),
-                    (n, Lang::En) => format!("{n} strings"),
-                };
                 ui.label(
-                    RichText::new(strings)
+                    RichText::new(strings_label(current.string_count, lang))
                         .color(strings_color(current.string_count))
                         .size(18.0),
                 );
@@ -695,11 +909,11 @@ impl TunerApp {
             }
         });
 
-        // Paso actual + lista de pasos
+        // Pasos
         ui.add_space(6.0);
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 for (i, s) in steps.iter().enumerate() {
                     let text = format!("{}. {}", i + 1, self.pick(s.title));
                     let rt = if i == self.step {
@@ -715,9 +929,8 @@ impl TunerApp {
                     }
                 }
             });
-            let detail = self.pick(step.detail);
-            if !detail.is_empty() {
-                ui.label(RichText::new(detail).size(16.0));
+            if self.settings.show_details {
+                ui.label(RichText::new(self.pick(step.detail)).size(16.0));
             }
         });
 
@@ -727,18 +940,24 @@ impl TunerApp {
             self.t("alta: aflojar ▶", "sharp: loosen ▶"),
         );
         let shown = self.shown_reading().map(|(r, f)| (r.cents, r.freq, f));
-        if step.kind == StepKind::Mute {
-            widgets::cents_meter(ui, None, self.settings.tolerance, true, labels);
-        } else {
-            widgets::cents_meter(
-                ui,
-                shown.map(|s| s.0),
-                self.settings.tolerance,
-                shown.map(|s| s.2).unwrap_or(false),
-                labels,
-            );
+        match step.kind {
+            StepKind::Mute => {
+                widgets::cents_meter(ui, None, self.settings.tolerance, true, labels);
+            }
+            _ => {
+                widgets::cents_meter(
+                    ui,
+                    shown.map(|s| s.0),
+                    self.settings.tolerance,
+                    shown.map(|s| s.2).unwrap_or(false),
+                    labels,
+                );
+                reading_line(ui, shown, &self.settings);
+            }
         }
-        reading_line(ui, shown, &self.settings);
+        if step.kind == StepKind::Unison && self.settings.show_beats {
+            self.beat_panel(ui);
+        }
 
         let auto = self.auto_progress(step.kind);
         if let Some(p) = auto {
@@ -753,7 +972,7 @@ impl TunerApp {
         let mut confirm = auto == Some(1.0);
         let mut back = false;
         let mut skip = false;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let size = egui::vec2(170.0, 46.0);
             back = ui
                 .add(egui::Button::new(self.t("◀ Anterior", "◀ Back")).min_size(size))
@@ -792,16 +1011,16 @@ impl TunerApp {
 
         // Acciones
         let last_cents = self.reading.as_ref().map(|r| r.cents);
+        let n_steps = steps.len();
         let Some(flow) = self.flow.as_mut() else {
             return;
         };
         let mut changed_note = false;
+        let mut changed_step = false;
         if confirm {
-            if self.step + 1 < steps.len() {
+            if self.step + 1 < n_steps {
                 self.step += 1;
-                self.reading = None;
-                self.lock_since = None;
-                flow.rearm_beep_latch();
+                changed_step = true;
             } else {
                 flow.confirm_current_note(last_cents.unwrap_or(0.0));
                 changed_note = true;
@@ -809,8 +1028,7 @@ impl TunerApp {
         } else if back {
             if self.step > 0 {
                 self.step -= 1;
-                self.reading = None;
-                self.lock_since = None;
+                changed_step = true;
             } else if flow.go_back_note() {
                 changed_note = true;
             }
@@ -823,7 +1041,62 @@ impl TunerApp {
         if changed_note {
             self.reset_note_state();
             self.save_session();
+        } else if changed_step {
+            self.new_step();
         }
+    }
+
+    /// Medidor de batido para los unisonos.
+    fn beat_panel(&self, ui: &mut egui::Ui) {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let (text, color) = match self.beat {
+                None => (
+                    self.t(
+                        "Batido: tocá la tecla y dejala sonar unos 2 segundos…",
+                        "Beats: play the key and let it ring for about 2 seconds…",
+                    )
+                    .to_string(),
+                    ui.visuals().weak_text_color(),
+                ),
+                Some(b) if b.clean => (
+                    self.t(
+                        "Sin batido ✔  El unísono está limpio.",
+                        "No beats ✔  The unison is clean.",
+                    )
+                    .to_string(),
+                    GREEN,
+                ),
+                Some(BeatInfo {
+                    rate_hz: Some(r), ..
+                }) => (
+                    format!(
+                        "{}: {r:.1} {}",
+                        self.t("Batido", "Beats"),
+                        self.t(
+                            "por segundo. Girá de a poco: más lento = más cerca.",
+                            "per second. Turn slowly: slower = closer."
+                        )
+                    ),
+                    ORANGE,
+                ),
+                Some(_) => (
+                    self.t(
+                        "Batido lento o irregular. Ajustá apenas y volvé a tocar.",
+                        "Slow or irregular beats. Adjust slightly and play again.",
+                    )
+                    .to_string(),
+                    ORANGE,
+                ),
+            };
+            ui.label(RichText::new(text).size(20.0).strong().color(color));
+            let pts: Vec<(f32, f32)> = self
+                .envelope_db
+                .iter()
+                .map(|(t, db)| (t + 3.0, *db))
+                .collect();
+            widgets::envelope_plot(ui, &pts, color);
+        });
     }
 
     /// Notas ya afinadas: `true` si quedaron dentro del margen.
@@ -875,13 +1148,203 @@ impl TunerApp {
         }
     }
 
+    // ---------------------------------------------------------- Medir piano
+
+    fn ui_measure(&mut self, ui: &mut egui::Ui) {
+        let sample_rate = self.mic.as_ref().map(|m| m.sample_rate()).unwrap_or(48_000);
+        let a4 = self.settings.piano.a4;
+        ui.heading(
+            RichText::new(self.t("Medir mi piano", "Measure my piano"))
+                .size(28.0)
+                .strong(),
+        );
+        ui.label(self.t(
+            "Tocá cada tecla que se marca, fuerte y dejándola sonar. Con eso se calcula cuánto \
+             estirar los agudos y los graves para TU piano. Alcanza con que una cuerda suene \
+             (no hace falta apagar las otras).",
+            "Play each highlighted key firmly and let it ring. This computes how much to stretch \
+             treble and bass for YOUR piano.",
+        ));
+        ui.add_space(8.0);
+
+        let Some(m) = self.measure.as_mut() else {
+            return;
+        };
+
+        // Captura de armonicos de la tecla actual
+        if m.result.is_none() {
+            if let (Some(&midi), Some(r)) = (MEASURE_KEYS.get(m.index), self.reading.as_ref()) {
+                let fresh = r.at.elapsed() < Duration::from_millis(200);
+                if m.captured_at.is_none() && fresh && r.confidence > 0.75 {
+                    let target = Temperament::with_a4(a4).frequency(midi);
+                    let win = PitchDetector::window_for_target(target);
+                    let want = (sample_rate as f32 * win.as_secs_f32()) as usize;
+                    let trimmed = if r.samples.len() > want {
+                        &r.samples[r.samples.len() - want..]
+                    } else {
+                        &r.samples[..]
+                    };
+                    let partials = PartialAnalyzer::new(sample_rate).analyze(trimmed, r.freq);
+                    let needed = if midi >= 88 { 2 } else { 4 };
+                    if partials.len() >= needed {
+                        m.done.insert(midi, partials.len());
+                        m.profile
+                            .record_note_with_partials(midi, r.freq, r.cents, partials);
+                        m.captured_at = Some(Instant::now());
+                    }
+                }
+            }
+            if m.captured_at
+                .is_some_and(|t| t.elapsed() > Duration::from_millis(900))
+            {
+                m.captured_at = None;
+                m.index += 1;
+                self.reading = None;
+            }
+        }
+
+        let m = self.measure.as_mut().unwrap();
+        let measured = m.done.len();
+        let current = MEASURE_KEYS.get(m.index).copied();
+        let mut finish = current.is_none() && m.result.is_none();
+
+        if let Some(midi) = current.filter(|_| m.result.is_none()) {
+            let name = Note::from_midi(midi)
+                .map(|n| n.display_name())
+                .unwrap_or_default();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&name).size(64.0).strong());
+                ui.add_space(12.0);
+                ui.vertical(|ui| {
+                    ui.add_space(10.0);
+                    ui.label(format!(
+                        "{} {} / {}",
+                        self.settings.t("Tecla", "Key"),
+                        m.index + 1,
+                        MEASURE_KEYS.len()
+                    ));
+                    if m.captured_at.is_some() {
+                        ui.label(
+                            RichText::new(self.settings.t("✔ Medida", "✔ Measured"))
+                                .color(GREEN)
+                                .size(20.0),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new(self.settings.t("Tocá esta tecla…", "Play this key…"))
+                                .size(20.0),
+                        );
+                    }
+                });
+            });
+        }
+        ui.add_space(6.0);
+        level_bar(ui, self.worker.as_ref().map(|w| w.level_db()));
+        ui.add_space(6.0);
+
+        let m = self.measure.as_mut().unwrap();
+        let mut highlight = HashMap::new();
+        for (k, _) in &m.done {
+            highlight.insert(*k, true);
+        }
+        for k in MEASURE_KEYS.iter().skip(m.index) {
+            highlight.entry(*k).or_insert(false);
+        }
+        widgets::keyboard(
+            ui,
+            current.filter(|_| m.result.is_none()),
+            &highlight,
+            string_count,
+        );
+
+        ui.add_space(10.0);
+        let (l_skip, l_finish, l_retry, l_use) = (
+            self.settings.t("Saltar tecla ▶", "Skip key ▶"),
+            self.settings.t("Terminar y calcular", "Finish and compute"),
+            self.settings.t("Medir de nuevo", "Measure again"),
+            self.settings.t("Volver al inicio", "Back to home"),
+        );
+        let mut restart = false;
+        let mut home = false;
+        let m = self.measure.as_mut().unwrap();
+        match &m.result {
+            None => {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new(l_skip).min_size(egui::vec2(170.0, 46.0)))
+                        .clicked()
+                    {
+                        m.index += 1;
+                        m.captured_at = None;
+                    }
+                    if ui
+                        .add_enabled(
+                            measured >= 3,
+                            egui::Button::new(l_finish).min_size(egui::vec2(220.0, 46.0)),
+                        )
+                        .clicked()
+                    {
+                        finish = true;
+                    }
+                });
+            }
+            Some(Ok(())) => {
+                ui.label(
+                    RichText::new(self.settings.t(
+                        "✔ Listo. Tu piano quedó medido y el estiramiento «Medido en este piano» está activado.",
+                        "✔ Done. Your piano is measured and \"Measured on this piano\" stretch is on.",
+                    ))
+                    .size(20.0)
+                    .color(GREEN),
+                );
+                ui.horizontal(|ui| {
+                    home = ui.button(l_use).clicked();
+                    restart = ui.button(l_retry).clicked();
+                });
+            }
+            Some(Err(e)) => {
+                ui.label(RichText::new(e).color(widgets::RED));
+                ui.horizontal(|ui| {
+                    restart = ui.button(l_retry).clicked();
+                    home = ui.button(l_use).clicked();
+                });
+            }
+        }
+
+        if finish {
+            let result = match stretch_from_profile(&m.profile) {
+                Ok(offsets) => {
+                    self.settings.piano.measured = Some(offsets.to_vec());
+                    self.settings.piano.stretch = StretchSel::Measured;
+                    Ok(())
+                }
+                Err(_) => Err(self
+                    .settings
+                    .t(
+                        "No alcanzaron las mediciones (hacen falta al menos 3 teclas con buenos armónicos). Probá tocar más fuerte o acercar la compu.",
+                        "Not enough measurements (at least 3 keys with clear overtones). Try playing louder or moving the laptop closer.",
+                    )
+                    .to_string()),
+            };
+            if let Some(m) = self.measure.as_mut() {
+                m.result = Some(result);
+            }
+        }
+        if restart {
+            self.start_measure();
+        }
+        if home {
+            self.go_home();
+        }
+    }
+
     // --------------------------------------------------------- Afinador libre
 
     fn ui_free(&mut self, ui: &mut egui::Ui) {
         ui.label(format!(
             "{}   ·   A4 = {:.1} Hz",
             self.t("Afinador libre", "Free tuner"),
-            self.settings.a4
+            self.settings.piano.a4
         ));
         ui.add_space(16.0);
         let shown = self
@@ -919,6 +1382,26 @@ impl TunerApp {
 
 fn string_count(midi: u8) -> u8 {
     Note::from_midi(midi).map(|n| n.string_count()).unwrap_or(1)
+}
+
+fn strings_label(n: u8, lang: Lang) -> String {
+    match (n, lang) {
+        (1, Lang::Es) => "1 cuerda".into(),
+        (1, Lang::En) => "1 string".into(),
+        (n, Lang::Es) => format!("{n} cuerdas"),
+        (n, Lang::En) => format!("{n} strings"),
+    }
+}
+
+/// Barra de volumen de entrada.
+fn level_bar(ui: &mut egui::Ui, db: Option<f32>) {
+    let db = db.unwrap_or(-120.0);
+    let norm = ((db + 70.0) / 70.0).clamp(0.0, 1.0);
+    ui.add(
+        egui::ProgressBar::new(norm)
+            .desired_width(ui.available_width().min(500.0))
+            .text(format!("{db:.0} dB")),
+    );
 }
 
 /// Linea con cents y Hz. `shown = (cents, Hz, lectura en vivo)`.
@@ -975,22 +1458,16 @@ fn note_combo(ui: &mut egui::Ui, id: &str, value: &mut u8, min: u8, max: u8) {
 
 impl eframe::App for TunerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if self.screen != Screen::Home {
-            self.poll_audio();
-            ctx.request_repaint_after(Duration::from_millis(30));
-        }
+        self.poll_audio();
+        ctx.request_repaint_after(Duration::from_millis(30));
+
         if let Some(err) = self.audio_error.clone() {
             let retry = self.t("Reintentar", "Retry");
             egui::TopBottomPanel::top("error").show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.colored_label(widgets::RED, err);
                     if ui.button(retry).clicked() {
-                        self.worker = None;
-                        self.mic = None;
-                        self.audio_error = None;
-                        if self.screen != Screen::Home {
-                            self.ensure_mic();
-                        }
+                        self.restart_mic();
                     }
                 });
             });
@@ -1011,6 +1488,7 @@ impl eframe::App for TunerApp {
                 Screen::Home => self.ui_home(ui),
                 Screen::Tuning => self.ui_tuning(ui),
                 Screen::Free => self.ui_free(ui),
+                Screen::Measure => self.ui_measure(ui),
             });
         });
 

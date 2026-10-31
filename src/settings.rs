@@ -1,37 +1,11 @@
-//! Ajustes del usuario, guardados en %APPDATA%\pianoTunerFree\settings.json.
+//! Ajustes del usuario, guardados en %APPDATA%\pianoTunerFree\config\settings.json.
 
 use std::path::PathBuf;
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct Settings {
-    /// Frecuencia del La central (A4) en Hz.
-    pub a4: f32,
-    /// Primera nota (MIDI) con 2 cuerdas.
-    pub bichord_from: u8,
-    /// Primera nota (MIDI) con 3 cuerdas.
-    pub trichord_from: u8,
-    /// Margen en cents para dar una nota por afinada.
-    pub tolerance: f32,
-    /// Aplicar el estiramiento de Railsback (agudos un poco mas altos,
-    /// graves un poco mas bajos), como hacen los afinadores profesionales.
-    pub stretch: bool,
-    /// Segundos que se mantiene en pantalla la ultima lectura despues de
-    /// que la nota se apaga (ayuda con los agudos que duran poco).
-    pub hold_secs: f32,
-    /// Idioma de la interfaz.
-    pub lang: Lang,
-    /// Aprendiz (recuerda apagar cuerdas) o avanzado (pasos directos).
-    pub mode: Mode,
-    /// Pasar solo al siguiente paso cuando la nota queda estable en la
-    /// zona verde (solo en pasos que se miden contra el objetivo).
-    pub auto_advance: bool,
-    /// Segundos que la nota tiene que quedar en la zona verde para avanzar.
-    pub auto_secs: f32,
-}
+use crate::tuning::StretchCurve;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum Lang {
@@ -40,27 +14,122 @@ pub enum Lang {
     En,
 }
 
+/// Nivel de ayuda. Cada nivel prende o apaga un grupo de opciones; si el
+/// usuario cambia alguna a mano queda en `Custom`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub enum Mode {
+pub enum Level {
     #[default]
-    Apprentice,
+    Basic,
+    Intermediate,
     Advanced,
+    Custom,
+}
+
+/// Que estiramiento aplicar a los objetivos.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum StretchSel {
+    /// Temperamento igual puro.
+    Off,
+    /// Curva promedio de Railsback.
+    #[default]
+    Standard,
+    /// Curva medida en este piano (ver "Medir mi piano").
+    Measured,
+}
+
+/// Datos de un piano.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PianoConfig {
+    pub name: String,
+    /// Frecuencia del La central (A4) en Hz.
+    pub a4: f32,
+    /// Primera nota (MIDI) con 2 cuerdas.
+    pub bichord_from: u8,
+    /// Primera nota (MIDI) con 3 cuerdas.
+    pub trichord_from: u8,
+    pub stretch: StretchSel,
+    /// Curva medida (88 valores en cents), si se midio el piano.
+    pub measured: Option<Vec<f32>>,
+}
+
+impl Default for PianoConfig {
+    fn default() -> Self {
+        Self {
+            name: "Mi piano".into(),
+            a4: 440.0,
+            bichord_from: 35,  // B1
+            trichord_from: 57, // A3
+            stretch: StretchSel::Standard,
+            measured: None,
+        }
+    }
+}
+
+impl PianoConfig {
+    /// Curva de estiramiento segun la eleccion.
+    pub fn stretch_curve(&self) -> Option<StretchCurve> {
+        match self.stretch {
+            StretchSel::Off => None,
+            StretchSel::Standard => Some(StretchCurve::railsback_default()),
+            StretchSel::Measured => match &self.measured {
+                Some(v) if v.len() == 88 => {
+                    let mut a = [0.0f32; 88];
+                    a.copy_from_slice(v);
+                    Some(StretchCurve::from_offsets(a))
+                }
+                _ => Some(StretchCurve::railsback_default()),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Settings {
+    pub piano: PianoConfig,
+    pub saved_pianos: Vec<PianoConfig>,
+    pub lang: Lang,
+    pub level: Level,
+    /// Mostrar un paso para apagar cuerdas antes de afinar.
+    pub remind_mute: bool,
+    /// Mostrar explicaciones en cada paso.
+    pub show_details: bool,
+    /// Avanzar solo cuando la cuerda queda estable en la zona verde.
+    pub auto_advance: bool,
+    /// Avanzar solo en los unisonos cuando no hay batido.
+    pub auto_unison: bool,
+    /// Mostrar el medidor de batido en los unisonos.
+    pub show_beats: bool,
+    /// Margen en cents para dar una nota por afinada.
+    pub tolerance: f32,
+    /// Segundos estable antes de avanzar solo.
+    pub auto_secs: f32,
+    /// Segundos que se mantiene la ultima lectura (agudos cortos).
+    pub hold_secs: f32,
+    /// Microfono elegido (None = el predeterminado de Windows).
+    pub mic_device: Option<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self {
-            a4: 440.0,
-            bichord_from: 35,  // B1
-            trichord_from: 57, // A3
-            tolerance: 5.0,
-            stretch: true,
-            hold_secs: 3.0,
+        let mut s = Self {
+            piano: PianoConfig::default(),
+            saved_pianos: Vec::new(),
             lang: Lang::Es,
-            mode: Mode::Apprentice,
+            level: Level::Basic,
+            remind_mute: true,
+            show_details: true,
             auto_advance: false,
+            auto_unison: false,
+            show_beats: true,
+            tolerance: 5.0,
             auto_secs: 1.0,
-        }
+            hold_secs: 3.0,
+            mic_device: None,
+        };
+        s.apply_level(Level::Basic);
+        s
     }
 }
 
@@ -70,10 +139,33 @@ impl Settings {
     }
 
     pub fn load() -> Self {
-        Self::path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        let Some(text) = Self::path().and_then(|p| std::fs::read_to_string(p).ok()) else {
+            return Self::default();
+        };
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return Self::default();
+        };
+        // Version anterior: los datos del piano estaban sueltos.
+        if value.get("piano").is_none() {
+            let mut piano = PianoConfig::default();
+            if let Some(v) = value.get("a4").and_then(|v| v.as_f64()) {
+                piano.a4 = v as f32;
+            }
+            if let Some(v) = value.get("bichord_from").and_then(|v| v.as_u64()) {
+                piano.bichord_from = v as u8;
+            }
+            if let Some(v) = value.get("trichord_from").and_then(|v| v.as_u64()) {
+                piano.trichord_from = v as u8;
+            }
+            if value.get("stretch").and_then(|v| v.as_bool()) == Some(false) {
+                piano.stretch = StretchSel::Off;
+            }
+            if let (Some(obj), Ok(p)) = (value.as_object_mut(), serde_json::to_value(&piano)) {
+                obj.insert("piano".into(), p);
+                obj.remove("stretch");
+            }
+        }
+        serde_json::from_value(value).unwrap_or_default()
     }
 
     pub fn save(&self) {
@@ -95,8 +187,25 @@ impl Settings {
         }
     }
 
+    /// Prende/apaga las opciones de un nivel.
+    pub fn apply_level(&mut self, level: Level) {
+        self.level = level;
+        let (remind, details, auto, unison, tol) = match level {
+            Level::Basic => (true, true, false, false, 5.0),
+            Level::Intermediate => (false, true, true, false, 3.0),
+            Level::Advanced => (false, false, true, true, 2.0),
+            Level::Custom => return,
+        };
+        self.remind_mute = remind;
+        self.show_details = details;
+        self.auto_advance = auto;
+        self.auto_unison = unison;
+        self.show_beats = true;
+        self.tolerance = tol;
+    }
+
     /// Aplica la distribucion de cuerdas al motor.
     pub fn apply_string_layout(&self) {
-        crate::tuning::set_string_layout(self.bichord_from, self.trichord_from);
+        crate::tuning::set_string_layout(self.piano.bichord_from, self.piano.trichord_from);
     }
 }
