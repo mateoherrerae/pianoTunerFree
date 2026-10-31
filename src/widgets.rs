@@ -248,3 +248,112 @@ pub fn envelope_plot(ui: &mut egui::Ui, pts: &[(f32, f32)], color: Color32) {
         .collect();
     p.add(egui::Shape::line(line, Stroke::new(2.0_f32, color)));
 }
+
+/// Lupa: medidor de -10 a +10 cents para el ajuste fino.
+pub fn fine_meter(ui: &mut egui::Ui, cents: Option<f32>, tolerance: f32, fresh: bool) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 46.0), Sense::hover());
+    let p = ui.painter_at(rect);
+    let fg = ui.visuals().text_color();
+    let range = 10.0;
+    let bar = Rect::from_min_max(
+        Pos2::new(rect.left() + 20.0, rect.top() + 4.0),
+        Pos2::new(rect.right() - 20.0, rect.top() + 26.0),
+    );
+    p.rect_filled(bar, 5.0, ui.visuals().extreme_bg_color);
+    let x_of = |c: f32| bar.center().x + (c.clamp(-range, range) / range) * bar.width() / 2.0;
+    p.rect_filled(
+        Rect::from_min_max(
+            Pos2::new(x_of(-tolerance), bar.top()),
+            Pos2::new(x_of(tolerance), bar.bottom()),
+        ),
+        3.0,
+        GREEN.gamma_multiply(0.3),
+    );
+    for c in -10..=10 {
+        let x = x_of(c as f32);
+        let major = c % 5 == 0;
+        let h = if c == 0 {
+            0.0
+        } else if major {
+            4.0
+        } else {
+            8.0
+        };
+        p.line_segment(
+            [Pos2::new(x, bar.top() + h), Pos2::new(x, bar.bottom() - h)],
+            Stroke::new(if c == 0 { 2.0_f32 } else { 1.0 }, fg.gamma_multiply(0.45)),
+        );
+        if major {
+            p.text(
+                Pos2::new(x, bar.bottom() + 9.0),
+                Align2::CENTER_CENTER,
+                if c > 0 {
+                    format!("+{c}")
+                } else {
+                    c.to_string()
+                },
+                FontId::proportional(11.0),
+                fg.gamma_multiply(0.55),
+            );
+        }
+    }
+    if let Some(c) = cents {
+        let color = if c.abs() <= tolerance { GREEN } else { ORANGE };
+        let color = if fresh {
+            color
+        } else {
+            color.gamma_multiply(0.45)
+        };
+        let x = x_of(c);
+        if c.abs() > range {
+            // fuera de la lupa: flecha en el borde
+            let dir = c.signum();
+            let tip = Pos2::new(x + dir * 2.0, bar.center().y);
+            let back = x - dir * 12.0;
+            p.add(egui::Shape::convex_polygon(
+                vec![
+                    tip,
+                    Pos2::new(back, bar.top() + 2.0),
+                    Pos2::new(back, bar.bottom() - 2.0),
+                ],
+                color,
+                Stroke::NONE,
+            ));
+        } else {
+            p.circle_filled(Pos2::new(x, bar.center().y), 8.0, color);
+        }
+    }
+}
+
+/// Estroboscopio: franjas que corren a la derecha si la nota esta alta y a
+/// la izquierda si esta baja; quietas cuando esta afinada. `phase` es el
+/// desplazamiento acumulado en pixeles.
+pub fn strobe(ui: &mut egui::Ui, phase: f32, active: bool, in_tune: bool) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 44.0), Sense::hover());
+    let p = ui.painter_at(rect);
+    let bar = rect.shrink2(Vec2::new(20.0, 2.0));
+    p.rect_filled(bar, 6.0, ui.visuals().extreme_bg_color);
+    if !active {
+        return;
+    }
+    let color = if in_tune { GREEN } else { BLUE };
+    // Dos filas: la de abajo va al doble (como el 2do armonico).
+    let h = bar.height() / 2.0;
+    for (row, mult, period) in [(0.0f32, 1.0f32, 28.0f32), (1.0, 2.0, 14.0)] {
+        let top = bar.top() + row * h;
+        let off = (phase * mult).rem_euclid(period * 2.0);
+        let mut x = bar.left() - period * 2.0 + off;
+        while x < bar.right() {
+            let r = Rect::from_min_max(
+                Pos2::new(x.max(bar.left()), top + 2.0),
+                Pos2::new((x + period).min(bar.right()), top + h - 2.0),
+            );
+            if r.width() > 0.0 {
+                p.rect_filled(r, 0.0, color.gamma_multiply(0.8));
+            }
+            x += period * 2.0;
+        }
+    }
+}

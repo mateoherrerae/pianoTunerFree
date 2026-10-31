@@ -101,6 +101,10 @@ pub struct Settings {
     pub auto_unison: bool,
     /// Mostrar el medidor de batido en los unisonos.
     pub show_beats: bool,
+    /// Mostrar la lupa de -10 a +10 cents.
+    pub fine_meter: bool,
+    /// Mostrar el estroboscopio.
+    pub strobe: bool,
     /// Margen en cents para dar una nota por afinada.
     pub tolerance: f32,
     /// Segundos estable antes de avanzar solo.
@@ -123,6 +127,8 @@ impl Default for Settings {
             auto_advance: false,
             auto_unison: false,
             show_beats: true,
+            fine_meter: true,
+            strobe: false,
             tolerance: 5.0,
             auto_secs: 1.0,
             hold_secs: 3.0,
@@ -190,10 +196,10 @@ impl Settings {
     /// Prende/apaga las opciones de un nivel.
     pub fn apply_level(&mut self, level: Level) {
         self.level = level;
-        let (remind, details, auto, unison, tol) = match level {
-            Level::Basic => (true, true, false, false, 5.0),
-            Level::Intermediate => (false, true, true, false, 3.0),
-            Level::Advanced => (false, false, true, true, 2.0),
+        let (remind, details, auto, unison, strobe, tol) = match level {
+            Level::Basic => (true, true, false, false, false, 5.0),
+            Level::Intermediate => (false, true, true, false, false, 3.0),
+            Level::Advanced => (false, false, true, true, true, 2.0),
             Level::Custom => return,
         };
         self.remind_mute = remind;
@@ -201,7 +207,23 @@ impl Settings {
         self.auto_advance = auto;
         self.auto_unison = unison;
         self.show_beats = true;
+        self.fine_meter = true;
+        self.strobe = strobe;
         self.tolerance = tol;
+    }
+
+    /// Las opciones que define un nivel (para saber si se toco alguna).
+    pub fn assists(&self) -> (bool, bool, bool, bool, bool, bool, bool, f32) {
+        (
+            self.remind_mute,
+            self.show_details,
+            self.auto_advance,
+            self.auto_unison,
+            self.show_beats,
+            self.fine_meter,
+            self.strobe,
+            self.tolerance,
+        )
     }
 
     /// Aplica la distribucion de cuerdas al motor.

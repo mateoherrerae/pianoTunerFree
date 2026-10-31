@@ -195,6 +195,9 @@ pub struct TunerApp {
     /// Preguntando si borrar la afinacion guardada.
     confirm_restart: bool,
     detect_a4: Option<DetectA4>,
+    /// Desplazamiento del estroboscopio (px) y ultimo cuadro.
+    strobe_phase: f32,
+    last_frame: Instant,
 }
 
 impl TunerApp {
@@ -230,6 +233,8 @@ impl TunerApp {
             pitch_cents: None,
             confirm_restart: false,
             detect_a4: None,
+            strobe_phase: 0.0,
+            last_frame: Instant::now(),
         };
         app.ensure_mic();
         app
@@ -505,6 +510,32 @@ impl TunerApp {
         }
         let since = *self.lock_since.get_or_insert_with(Instant::now);
         Some((since.elapsed().as_secs_f32() / self.settings.auto_secs.max(0.2)).min(1.0))
+    }
+
+    /// Medidor principal + lupa + estroboscopio segun los ajustes.
+    fn meters(&self, ui: &mut egui::Ui, shown: Option<(f32, bool)>, labels: (&str, &str)) {
+        let tol = self.settings.tolerance;
+        let cents = shown.map(|s| s.0);
+        let fresh = shown.map(|s| s.1).unwrap_or(false);
+        widgets::cents_meter(ui, cents, tol, fresh, labels);
+        if self.settings.fine_meter {
+            widgets::fine_meter(ui, cents, tol, fresh);
+        }
+        if self.settings.strobe {
+            let in_tune = cents.is_some_and(|c| c.abs() <= tol);
+            widgets::strobe(ui, self.strobe_phase, fresh, in_tune);
+        }
+    }
+
+    /// Mueve el estroboscopio segun la lectura en vivo.
+    fn advance_strobe(&mut self) {
+        let dt = self.last_frame.elapsed().as_secs_f32().min(0.1);
+        self.last_frame = Instant::now();
+        if let Some((r, true)) = self.shown_reading() {
+            // 1 cent = 6 px/s (hasta +-50 cents)
+            let speed = r.cents.clamp(-50.0, 50.0) * 6.0;
+            self.strobe_phase = (self.strobe_phase + speed * dt) % 10_000.0;
+        }
     }
 
     // ------------------------------------------------------------ Barra comun
@@ -879,6 +910,14 @@ impl TunerApp {
             ),
             s.t("Margen de afinado", "In-tune margin"),
             s.t(
+                "Lupa de ±10 cents para el ajuste fino",
+                "±10 cent magnifier for fine adjustment",
+            ),
+            s.t(
+                "Estroboscopio (las franjas se quedan quietas cuando está afinada)",
+                "Strobe (stripes stand still when in tune)",
+            ),
+            s.t(
                 "Tiempo estable para avanzar",
                 "Time stable before advancing",
             ),
@@ -895,20 +934,15 @@ impl TunerApp {
             .id_salt("help")
             .default_open(true)
             .show(ui, |ui| {
-                ui.label(RichText::new(l.8).weak());
-                let before = (
-                    self.settings.remind_mute,
-                    self.settings.show_details,
-                    self.settings.auto_advance,
-                    self.settings.auto_unison,
-                    self.settings.show_beats,
-                    self.settings.tolerance,
-                );
+                ui.label(RichText::new(l.10).weak());
+                let before = self.settings.assists();
                 ui.checkbox(&mut self.settings.remind_mute, l.0);
                 ui.checkbox(&mut self.settings.show_details, l.1);
                 ui.checkbox(&mut self.settings.auto_advance, l.2);
                 ui.checkbox(&mut self.settings.auto_unison, l.3);
                 ui.checkbox(&mut self.settings.show_beats, l.4);
+                ui.checkbox(&mut self.settings.fine_meter, l.6);
+                ui.checkbox(&mut self.settings.strobe, l.7);
                 egui::Grid::new("help_grid")
                     .num_columns(2)
                     .spacing([24.0, 8.0])
@@ -919,26 +953,18 @@ impl TunerApp {
                                 .suffix(" cents"),
                         );
                         ui.end_row();
-                        ui.label(l.6);
+                        ui.label(l.8);
                         ui.add(
                             egui::Slider::new(&mut self.settings.auto_secs, 0.3..=3.0).suffix(" s"),
                         );
                         ui.end_row();
-                        ui.label(l.7);
+                        ui.label(l.9);
                         ui.add(
                             egui::Slider::new(&mut self.settings.hold_secs, 0.0..=8.0).suffix(" s"),
                         );
                         ui.end_row();
                     });
-                let after = (
-                    self.settings.remind_mute,
-                    self.settings.show_details,
-                    self.settings.auto_advance,
-                    self.settings.auto_unison,
-                    self.settings.show_beats,
-                    self.settings.tolerance,
-                );
-                if before != after {
+                if before != self.settings.assists() {
                     self.settings.level = Level::Custom;
                 }
             });
@@ -1083,13 +1109,7 @@ impl TunerApp {
                 widgets::cents_meter(ui, None, self.settings.tolerance, true, labels);
             }
             _ => {
-                widgets::cents_meter(
-                    ui,
-                    shown.map(|s| s.0),
-                    self.settings.tolerance,
-                    shown.map(|s| s.2).unwrap_or(false),
-                    labels,
-                );
+                self.meters(ui, shown.map(|s| (s.0, s.2)), labels);
                 reading_line(ui, shown, &self.settings);
                 if let Some((cents, freq, true)) = shown {
                     if let Some(h) = wrong_note_hint(freq, cents, a4, current.midi, lang) {
@@ -1516,13 +1536,7 @@ impl TunerApp {
         });
         ui.add_space(10.0);
         let labels = (self.t("◀ baja", "◀ flat"), self.t("alta ▶", "sharp ▶"));
-        widgets::cents_meter(
-            ui,
-            shown.map(|s| s.0),
-            self.settings.tolerance,
-            shown.map(|s| s.2).unwrap_or(false),
-            labels,
-        );
+        self.meters(ui, shown.map(|s| (s.0, s.2)), labels);
         reading_line(ui, shown.map(|s| (s.0, s.1, s.2)), &self.settings);
         ui.add_space(14.0);
         widgets::keyboard(ui, note.map(|n| n.midi), &HashMap::new(), string_count);
@@ -1669,6 +1683,7 @@ fn note_combo(ui: &mut egui::Ui, id: &str, value: &mut u8, min: u8, max: u8) {
 impl eframe::App for TunerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_audio();
+        self.advance_strobe();
         ctx.request_repaint_after(Duration::from_millis(30));
 
         if let Some(err) = self.audio_error.clone() {
