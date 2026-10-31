@@ -173,7 +173,10 @@ impl TuningFlow {
     /// the session is finished.
     pub fn confirm_current_note(&mut self, final_cents: f32) -> bool {
         if let Some(note) = self.tuning_order.note_at(self.current_note_idx) {
-            self.session.complete_note(note.display_name(), final_cents);
+            // Una nota revisitada reemplaza su registro anterior.
+            let name = note.display_name();
+            self.session.completed_notes.retain(|cn| cn.note != name);
+            self.session.complete_note(name, final_cents);
         }
         self.advance()
     }
@@ -237,6 +240,18 @@ mod tests {
             Temperament::with_a4(440.0),
             Some(StretchCurve::railsback_default()),
         )
+    }
+
+    #[test]
+    fn test_reconfirming_a_revisited_note_replaces_its_record() {
+        let mut f = flow();
+        let midi = f.current_note().unwrap().midi;
+        f.confirm_current_note(3.0);
+        assert!(f.go_to_midi(midi));
+        f.confirm_current_note(-1.0);
+        let recs: Vec<_> = f.session().completed_notes.iter().collect();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].final_cents, -1.0);
     }
 
     #[test]

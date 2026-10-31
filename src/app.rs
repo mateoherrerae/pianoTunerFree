@@ -180,6 +180,8 @@ pub struct TunerApp {
     envelope_db: Vec<(f32, f32)>,
     resumable: Option<Session>,
     measure: Option<Measure>,
+    /// Desvio de la cuerda afinada sola (lo que se guarda de la nota).
+    pitch_cents: Option<f32>,
 }
 
 impl TunerApp {
@@ -212,6 +214,7 @@ impl TunerApp {
             envelope_db: Vec::new(),
             resumable: Session::load_recent().ok().flatten(),
             measure: None,
+            pitch_cents: None,
         };
         app.ensure_mic();
         app
@@ -429,6 +432,7 @@ impl TunerApp {
 
     fn reset_note_state(&mut self) {
         self.step = 0;
+        self.pitch_cents = None;
         self.new_step();
     }
 
@@ -1011,6 +1015,10 @@ impl TunerApp {
 
         // Acciones
         let last_cents = self.reading.as_ref().map(|r| r.cents);
+        if confirm && step.kind == StepKind::Pitch {
+            self.pitch_cents = last_cents;
+        }
+        let final_cents = self.pitch_cents.or(last_cents).unwrap_or(0.0);
         let n_steps = steps.len();
         let Some(flow) = self.flow.as_mut() else {
             return;
@@ -1022,7 +1030,7 @@ impl TunerApp {
                 self.step += 1;
                 changed_step = true;
             } else {
-                flow.confirm_current_note(last_cents.unwrap_or(0.0));
+                flow.confirm_current_note(final_cents);
                 changed_note = true;
             }
         } else if back {
