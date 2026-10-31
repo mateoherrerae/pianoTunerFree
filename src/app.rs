@@ -2069,11 +2069,11 @@ fn pitch_raise_warning(a4: f32, lang: Lang) -> Option<String> {
     }
     Some(match lang {
         Lang::Es => format!(
-            "Tu piano está {:.0} cents abajo de 440. Afinarlo donde está es lo más seguro.              Para subirlo a 440 conviene ir de a poco (ej. dos pasadas, primero a la mitad):              subir mucho de golpe puede romper cuerdas viejas.",
+            "Tu piano está {:.0} cents abajo de 440. Afinarlo donde está es lo más seguro. Para subirlo a 440 conviene ir de a poco (ej. dos pasadas, primero a la mitad): subir mucho de golpe puede romper cuerdas viejas.",
             -cents
         ),
         Lang::En => format!(
-            "Your piano is {:.0} cents below 440. Tuning it where it is is safest.              To bring it to 440, go in steps (e.g. two passes, halfway first):              a big raise at once can break old strings.",
+            "Your piano is {:.0} cents below 440. Tuning it where it is is safest. To bring it to 440, go in steps (e.g. two passes, halfway first): a big raise at once can break old strings.",
             -cents
         ),
     })
