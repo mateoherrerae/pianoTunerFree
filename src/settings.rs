@@ -51,6 +51,8 @@ pub struct PianoConfig {
     pub stretch: StretchSel,
     /// Curva medida (88 valores en cents), si se midio el piano.
     pub measured: Option<Vec<f32>>,
+    /// Cantidad de teclas: 88, o 85 en muchos pianos viejos (terminan en A7).
+    pub keys: u8,
 }
 
 impl Default for PianoConfig {
@@ -62,11 +64,22 @@ impl Default for PianoConfig {
             trichord_from: 57, // A3
             stretch: StretchSel::Standard,
             measured: None,
+            keys: 88,
         }
     }
 }
 
 impl PianoConfig {
+    /// Nota mas aguda que tiene el piano (MIDI).
+    pub fn top_midi(&self) -> u8 {
+        (21 + self.keys.clamp(1, 88) - 1).min(108)
+    }
+
+    /// La nota existe en este piano.
+    pub fn has_key(&self, midi: u8) -> bool {
+        (21..=self.top_midi()).contains(&midi)
+    }
+
     /// Curva de estiramiento segun la eleccion.
     pub fn stretch_curve(&self) -> Option<StretchCurve> {
         match self.stretch {
@@ -247,5 +260,26 @@ impl Settings {
     /// Aplica la distribucion de cuerdas al motor.
     pub fn apply_string_layout(&self) {
         crate::tuning::set_string_layout(self.piano.bichord_from, self.piano.trichord_from);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_pianos_with_85_keys_end_on_a7() {
+        let mut p = PianoConfig::default();
+        assert_eq!(p.top_midi(), 108);
+        p.keys = 85;
+        assert_eq!(p.top_midi(), 105);
+        assert!(p.has_key(105));
+        assert!(!p.has_key(106));
+    }
+
+    #[test]
+    fn settings_without_keys_load_as_88() {
+        let p: PianoConfig = serde_json::from_str(r#"{"name":"x","a4":417.0}"#).unwrap();
+        assert_eq!(p.keys, 88);
     }
 }

@@ -964,6 +964,15 @@ impl TunerApp {
                     s.t("Cancelar", "Cancel"),
                 );
                 let mut cancel_detect = false;
+                let keys_l = (
+                    s.t("Teclas", "Keys"),
+                    s.t("88 (termina en Do)", "88 (ends on C)"),
+                    s.t("85 (termina en La)", "85 (ends on A)"),
+                    s.t(
+                        "Muchos pianos viejos tienen 85: mirá si la última tecla blanca es un La.",
+                        "Many old pianos have 85: check if the last white key is an A.",
+                    ),
+                );
                 let pitch_warning = pitch_raise_warning(s.piano.a4, s.lang);
                 egui::Grid::new("piano_grid")
                     .num_columns(2)
@@ -1026,6 +1035,14 @@ impl TunerApp {
                         ui.label(RichText::new(labels.3).strong());
                         let min = self.settings.piano.bichord_from;
                         note_combo(ui, "tri", &mut self.settings.piano.trichord_from, min, 108);
+                        ui.end_row();
+
+                        ui.label(RichText::new(keys_l.0).strong());
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut self.settings.piano.keys, 88, keys_l.1);
+                            ui.selectable_value(&mut self.settings.piano.keys, 85, keys_l.2);
+                            ui.label(RichText::new(keys_l.3).weak());
+                        });
                         ui.end_row();
 
                         ui.label(RichText::new(labels.4).strong());
@@ -1234,8 +1251,9 @@ impl TunerApp {
                 self.settings.remind_mute && matches!(current.note_index, 0 | 13 | 56),
             ),
         };
-        if steps.is_empty() {
-            // Nota de una cuerda en la pasada de unisonos: no hay nada que hacer.
+        if steps.is_empty() || !self.settings.piano.has_key(current.midi) {
+            // Nota de una cuerda en la pasada de unisonos, o tecla que este
+            // piano no tiene (pianos de 85): no hay nada que hacer.
             if let Some(f) = self.flow.as_mut() {
                 f.skip_current_note();
             }
@@ -1292,11 +1310,11 @@ impl TunerApp {
         }
         ui.horizontal(|ui| {
             ui.add(
-                egui::ProgressBar::new(done_count as f32 / current.total_notes.max(1) as f32)
+                egui::ProgressBar::new(done_count as f32 / self.settings.piano.keys.max(1) as f32)
                     .desired_width(260.0)
                     .text(format!(
                         "{done_count}/{} {}",
-                        current.total_notes,
+                        self.settings.piano.keys,
                         self.t("afinadas", "tuned")
                     )),
             );
@@ -1491,6 +1509,9 @@ impl TunerApp {
                 changed_note = prev.is_some_and(|m| flow.go_to_midi(m));
             } else if flow.go_back_note() {
                 changed_note = true;
+                // Saltar hacia atras las teclas que el piano no tiene.
+                let top = self.settings.piano.top_midi();
+                while flow.current_note().is_some_and(|n| n.midi > top) && flow.go_back_note() {}
             }
         } else if skip {
             flow.skip_current_note();
