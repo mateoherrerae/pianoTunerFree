@@ -29,6 +29,7 @@ Double-click to open. If Windows SmartScreen shows a warning, click **More info 
 - **Felt strip mode**: tune every free string first, then all unisons in a second pass, like pro tuners.
 - **Tuning report**: deviation chart over the keyboard and CSV export.
 - **Piano-like reference tone** (audible even in the bass on laptop speakers), `R` shortcut.
+- **85 or 88 keys**: many old pianos end on A7; the app skips the keys yours doesn't have.
 - **English and Spanish** interface.
 
 ## Microphone tips (laptops)

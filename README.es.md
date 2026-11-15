@@ -29,6 +29,7 @@ Abrilo con doble clic. Si Windows SmartScreen muestra un aviso, tocá **Más inf
 - **Modo tira de fieltro**: primero todas las cuerdas libres y después los unísonos, como los afinadores.
 - **Informe de afinación**: gráfico de desvíos sobre el teclado y exportar a CSV.
 - **Referencia con sonido de piano** (se escucha hasta en los graves con parlantes de notebook), atajo `R`.
+- **85 u 88 teclas**: muchos pianos viejos terminan en La; la app saltea las teclas que el tuyo no tiene.
 - Interfaz en **español e inglés**.
 
 ## Consejos de micrófono (notebooks)
