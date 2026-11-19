@@ -278,6 +278,8 @@ pub struct TunerApp {
     confirm_finish: bool,
     /// Afinaciones guardadas (se relee al volver al inicio).
     history: Vec<Session>,
+    /// Preguntando con que La afinar (hoy o el de la ultima vez).
+    choose_a4: bool,
     detect_a4: Option<DetectA4>,
     /// Resultado del ultimo exportado: (ok, ruta o error).
     export_msg: Option<(bool, String)>,
@@ -324,6 +326,7 @@ impl TunerApp {
             confirm_restart: false,
             confirm_finish: false,
             history: Session::list_all().unwrap_or_default(),
+            choose_a4: false,
             detect_a4: None,
             export_msg: None,
             ignore_until: None,
@@ -627,6 +630,113 @@ impl TunerApp {
         self.enter(Screen::Tuning);
     }
 
+    /// La ultima afinacion guardada de este piano (con notas hechas).
+    fn last_tuning(&self) -> Option<&Session> {
+        let name = &self.settings.piano.name;
+        self.history
+            .iter()
+            .filter(|s| s.piano_name.as_ref() == Some(name) && !s.completed_notes.is_empty())
+            .max_by_key(|s| s.updated_at)
+    }
+
+    /// Empezar una afinacion nueva; si este piano ya se afino con otro La,
+    /// primero preguntar con cual.
+    fn request_start(&mut self) {
+        let differs = self
+            .last_tuning()
+            .is_some_and(|s| cents_between(self.settings.piano.a4, s.a4_reference).abs() >= 1.0);
+        if differs {
+            self.choose_a4 = true;
+        } else {
+            self.start_tuning();
+        }
+    }
+
+    /// Elegir el La: el de la ultima vez, el de hoy o la mitad.
+    fn a4_dialog(&mut self, ctx: &egui::Context) {
+        let Some(last) = self.last_tuning().cloned() else {
+            self.choose_a4 = false;
+            return;
+        };
+        let now = self.settings.piano.a4;
+        let prev = last.a4_reference;
+        let diff = cents_between(now, prev);
+        let es = self.settings.lang == Lang::Es;
+        let body = if es {
+            format!(
+                "La última vez ({}) afinaste este piano con La = {prev:.1} Hz.\nHoy está en {now:.1} Hz: {:.0} cents más {}.",
+                last.date_label(),
+                diff.abs(),
+                if diff < 0.0 { "bajo" } else { "alto" }
+            )
+        } else {
+            format!(
+                "Last time ({}) you tuned this piano to A = {prev:.1} Hz.\nToday it's at {now:.1} Hz: {:.0} cents {}.",
+                last.date_label(),
+                diff.abs(),
+                if diff < 0.0 { "lower" } else { "higher" }
+            )
+        };
+        let half = (now * prev).sqrt();
+        let big_raise = diff < -20.0;
+        let mut pick: Option<f32> = None;
+        let mut cancel = false;
+        egui::Window::new(self.t("¿Con qué La afinás?", "Which A do you tune to?"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(RichText::new(body).strong());
+                ui.add_space(6.0);
+                let up = format!(
+                    "{} ({prev:.1} Hz)",
+                    if diff < 0.0 {
+                        self.t("⬆ Subirlo a la de la última vez", "⬆ Raise it to last time's")
+                    } else {
+                        self.t("⬇ Bajarlo a la de la última vez", "⬇ Lower it to last time's")
+                    }
+                );
+                if ui
+                    .add(egui::Button::new(RichText::new(up).color(Color32::WHITE)).fill(GREEN))
+                    .clicked()
+                {
+                    pick = Some(prev);
+                }
+                if big_raise {
+                    ui.label(RichText::new(self.t(
+                        "Es mucho para subir de una: puede cortar cuerdas viejas. Mejor dos pasadas: primero a la mitad, después a la de la última vez.",
+                        "That's a big raise at once: old strings can break. Better two passes: halfway first, then last time's pitch.",
+                    )).color(ORANGE));
+                    let mid = format!(
+                        "{} ({half:.1} Hz)",
+                        self.t("Primera pasada: a la mitad", "First pass: halfway")
+                    );
+                    if ui.button(mid).clicked() {
+                        pick = Some(half);
+                    }
+                }
+                let stay = format!(
+                    "{} ({now:.1} Hz)",
+                    self.t("Afinarlo donde está hoy", "Tune it where it is today")
+                );
+                if ui.button(stay).clicked() {
+                    pick = Some(now);
+                }
+                ui.add_space(4.0);
+                cancel = ui.button(self.t("Cancelar", "Cancel")).clicked();
+            });
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            cancel = true;
+        }
+        if let Some(a4) = pick {
+            self.choose_a4 = false;
+            self.settings.piano.a4 = (a4 * 10.0).round() / 10.0;
+            self.start_tuning();
+        } else if cancel {
+            self.choose_a4 = false;
+        }
+    }
+
     /// Antes de seguir una afinacion, cargar el piano con el que se hizo
     /// (cuerdas, teclas) y su La, para no mezclar tonalidades.
     fn select_piano_of(&mut self, session: &Session) {
@@ -868,7 +978,7 @@ impl TunerApp {
                 if self.resumable.is_some() {
                     self.confirm_restart = true;
                 } else {
-                    self.start_tuning();
+                    self.request_start();
                 }
             }
             if ui
@@ -920,7 +1030,7 @@ impl TunerApp {
         }
         if start {
             self.confirm_restart = false;
-            self.start_tuning();
+            self.request_start();
         } else if cancel {
             self.confirm_restart = false;
         }
@@ -1157,6 +1267,31 @@ impl TunerApp {
                     ),
                 );
                 let pitch_warning = pitch_raise_warning(s.piano.a4, s.lang);
+                let last_l = self.last_tuning().map(|l| {
+                    let diff = cents_between(s.piano.a4, l.a4_reference);
+                    let today = if diff.abs() >= 1.0 {
+                        match s.lang {
+                            Lang::Es => format!(" (hoy {diff:+.0} cents)"),
+                            Lang::En => format!(" (today {diff:+.0} cents)"),
+                        }
+                    } else {
+                        String::new()
+                    };
+                    let text = match s.lang {
+                        Lang::Es => format!(
+                            "Última afinación de este piano: {} con La = {:.1} Hz{today}",
+                            l.date_label(),
+                            l.a4_reference
+                        ),
+                        Lang::En => format!(
+                            "Last tuning of this piano: {} at A = {:.1} Hz{today}",
+                            l.date_label(),
+                            l.a4_reference
+                        ),
+                    };
+                    (text, l.a4_reference, diff.abs() >= 1.0)
+                });
+                let use_last_l = s.t("↺ Usar la de la última vez", "↺ Use last time's");
                 egui::Grid::new("piano_grid")
                     .num_columns(2)
                     .spacing([24.0, 10.0])
@@ -1205,6 +1340,14 @@ impl TunerApp {
                         ui.label("");
                         ui.vertical(|ui| {
                             ui.label(RichText::new(labels.1).weak());
+                            if let Some((text, a4, differs)) = &last_l {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(RichText::new(text).color(widgets::BLUE));
+                                    if *differs && ui.small_button(use_last_l).clicked() {
+                                        self.settings.piano.a4 = *a4;
+                                    }
+                                });
+                            }
                             if let Some(w) = &pitch_warning {
                                 ui.label(RichText::new(w).color(ORANGE));
                             }
@@ -2387,6 +2530,11 @@ fn phase_text(position: usize, lang: Lang) -> (&'static str, &'static str) {
     }
 }
 
+/// Distancia en cents de `a` respecto de `b` (negativo: `a` mas bajo).
+fn cents_between(a: f32, b: f32) -> f32 {
+    1200.0 * (a / b).log2()
+}
+
 /// "E3, D#3, D3 …" con como mucho `max` notas.
 fn notes_list(midis: &[u8], max: usize) -> String {
     let mut names: Vec<String> = midis
@@ -2502,6 +2650,9 @@ impl eframe::App for TunerApp {
         if self.confirm_finish {
             self.finish_dialog(ctx);
         }
+        if self.choose_a4 {
+            self.a4_dialog(ctx);
+        }
         egui::TopBottomPanel::bottom("footer").show(ctx, |ui| {
             ui.label(
                 RichText::new(self.t(
@@ -2584,6 +2735,13 @@ mod tests {
         // sin tira: 3 cuerdas con recordatorio = 4 pasos
         assert_eq!(steps_for(3, true).len(), 4);
         assert_eq!(steps_for(3, false).len(), 3);
+    }
+
+    #[test]
+    fn cents_between_pitches() {
+        assert!((cents_between(436.1, 440.4) + 17.0).abs() < 0.5);
+        assert!(cents_between(440.0, 440.0).abs() < 1e-4);
+        assert_eq!(notes_list(&[52, 51, 50], 2), "E3, D#3, …");
     }
 
     #[test]
