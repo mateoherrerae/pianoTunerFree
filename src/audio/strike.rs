@@ -217,7 +217,11 @@ mod tests {
         quiet(&mut t, s, 0, 300);
         // C7 que se apaga en ~0,6 s; el ataque lee cualquier cosa.
         let r = strike(&mut t, s, 300, -20.0, 60.0, |ms| {
-            if ms < 50 { 3000.0 } else { 2093.0 * 2f32.powf(3.0 / 1200.0) }
+            if ms < 50 {
+                3000.0
+            } else {
+                2093.0 * 2f32.powf(3.0 / 1200.0)
+            }
         });
         assert_eq!(r.len(), 1, "{r:?}");
         let r = r[0];
@@ -259,7 +263,9 @@ mod tests {
         let mut t = StrikeTracker::new();
         let s = Instant::now();
         for ms in (0..2000).step_by(10) {
-            assert!(t.observe_level(s + Duration::from_millis(ms), -30.0).is_none());
+            assert!(t
+                .observe_level(s + Duration::from_millis(ms), -30.0)
+                .is_none());
         }
         assert!(t.finish().is_none());
     }

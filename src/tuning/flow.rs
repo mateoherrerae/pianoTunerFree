@@ -208,7 +208,10 @@ impl TuningFlow {
 
     /// La nota ya tiene registro.
     pub fn is_done(&self, midi: u8) -> bool {
-        self.session.completed_notes.iter().any(|cn| cn.midi == midi)
+        self.session
+            .completed_notes
+            .iter()
+            .any(|cn| cn.midi == midi)
     }
 
     /// La nota falta: ni afinada ni salteada a proposito.
@@ -231,13 +234,11 @@ impl TuningFlow {
     /// quedaran notas sin afinar).
     fn advance_to_pending(&mut self) -> bool {
         let len = self.tuning_order.len();
-        let next = (self.current_note_idx + 1..len)
-            .chain(0..len)
-            .find(|&p| {
-                self.tuning_order
-                    .note_at(p)
-                    .is_some_and(|n| self.is_pending(n.midi))
-            });
+        let next = (self.current_note_idx + 1..len).chain(0..len).find(|&p| {
+            self.tuning_order
+                .note_at(p)
+                .is_some_and(|n| self.is_pending(n.midi))
+        });
         self.current_note_idx = next.unwrap_or(NOTE_COUNT);
         self.session.current_note_index = self.current_note_idx;
         self.in_tune_latched = false;
