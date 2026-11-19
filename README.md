@@ -31,6 +31,7 @@ Double-click to open. If Windows SmartScreen shows a warning, click **More info 
 - **Piano-like reference tone** (audible even in the bass on laptop speakers), `R` shortcut.
 - **85 or 88 keys**: many old pianos end on A7; the app skips the keys yours doesn't have.
 - **Nothing gets lost**: every tuning is saved with its piano. It only finishes when no note is missing (or when you press *Finish tuning*), *Start over* keeps the old one, and any saved tuning can be reopened from *Saved tunings*.
+- **Strike capture for the treble**: short high notes are measured per strike (hammer noise skipped, median of the whole strike) and the result stays frozen until the next strike, with the last 5 strikes shown. Auto-advance after 2 good strikes; treble unisons warn when the strings beat.
 - **Tune the same piano again**: the app remembers last time's A and lets you raise it back to that pitch, go halfway first (big raises) or tune it where it is today.
 - **English and Spanish** interface.
 
