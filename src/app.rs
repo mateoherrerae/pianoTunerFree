@@ -274,6 +274,8 @@ pub struct TunerApp {
     pitch_cents: Option<f32>,
     /// Preguntando si borrar la afinacion guardada.
     confirm_restart: bool,
+    /// Preguntando si terminar la afinacion aunque falten notas.
+    confirm_finish: bool,
     detect_a4: Option<DetectA4>,
     /// Resultado del ultimo exportado: (ok, ruta o error).
     export_msg: Option<(bool, String)>,
@@ -318,6 +320,7 @@ impl TunerApp {
             measure: None,
             pitch_cents: None,
             confirm_restart: false,
+            confirm_finish: false,
             detect_a4: None,
             export_msg: None,
             ignore_until: None,
@@ -869,6 +872,78 @@ impl TunerApp {
         } else if cancel {
             self.confirm_restart = false;
         }
+    }
+
+    /// Pregunta antes de terminar: muestra las notas que faltan.
+    fn finish_dialog(&mut self, ctx: &egui::Context) {
+        let pending = self
+            .flow
+            .as_ref()
+            .map(|f| f.pending_notes())
+            .unwrap_or_default();
+        let es = self.settings.lang == Lang::Es;
+        let body = if pending.is_empty() {
+            self.t("Están todas las notas.", "Every note is done.").to_string()
+        } else {
+            format!(
+                "{} {}: {}",
+                if es { "Faltan" } else { "Still missing" },
+                pending.len(),
+                notes_list(&pending, 12)
+            )
+        };
+        let (title, hint, keep, finish) = (
+            self.t("¿Terminar la afinación?", "Finish the tuning?"),
+            self.t(
+                "Queda guardada y la podés reabrir cuando quieras desde «Afinaciones guardadas».",
+                "It stays saved and you can reopen it anytime from \"Saved tunings\".",
+            ),
+            self.t("Seguir afinando", "Keep tuning"),
+            self.t("Terminar", "Finish"),
+        );
+        let mut yes = false;
+        let mut no = false;
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(RichText::new(body).strong());
+                ui.label(hint);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    no = ui
+                        .add(
+                            egui::Button::new(RichText::new(keep).color(Color32::WHITE))
+                                .fill(GREEN),
+                        )
+                        .clicked();
+                    yes = ui.button(finish).clicked();
+                });
+            });
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            no = true;
+        }
+        if yes {
+            if let Some(f) = self.flow.as_mut() {
+                f.finish();
+            }
+            self.confirm_finish = false;
+            self.reset_note_state();
+            self.save_session();
+        } else if no {
+            self.confirm_finish = false;
+        }
+    }
+
+    /// Reabrir la afinacion que se esta mostrando como terminada.
+    fn reopen_current(&mut self) {
+        self.settings.unison_pass = false;
+        if let Some(f) = self.flow.as_mut() {
+            f.reopen();
+        }
+        self.reset_note_state();
+        self.save_session();
     }
 
     fn section_piano(&mut self, ui: &mut egui::Ui) {
@@ -1471,6 +1546,28 @@ impl TunerApp {
         );
         let done = self.done_map();
         let clicked = widgets::keyboard(ui, Some(current.midi), &done, string_count);
+        if pass != StripPass::Unisons {
+            let missing = self
+                .flow
+                .as_ref()
+                .map(|f| f.pending_notes().len())
+                .unwrap_or(0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{} {missing}",
+                        self.t("Notas que faltan:", "Notes left:")
+                    ))
+                    .weak(),
+                );
+                if ui
+                    .button(self.t("🏁 Terminar afinación…", "🏁 Finish tuning…"))
+                    .clicked()
+                {
+                    self.confirm_finish = true;
+                }
+            });
+        }
         egui::CollapsingHeader::new(self.t("Informe hasta ahora", "Report so far"))
             .id_salt("report_live")
             .default_open(false)
@@ -1721,15 +1818,49 @@ impl TunerApp {
             self.t("Notas afinadas", "Notes tuned"),
             self.t("desvío promedio", "average deviation")
         ));
+        let (pending, skipped) = self
+            .flow
+            .as_ref()
+            .map(|f| (f.pending_notes(), f.session().skipped.clone()))
+            .unwrap_or_default();
+        if !pending.is_empty() {
+            ui.colored_label(
+                ORANGE,
+                format!(
+                    "{} ({}): {}",
+                    self.t("Quedaron sin afinar", "Left untuned"),
+                    pending.len(),
+                    notes_list(&pending, 20)
+                ),
+            );
+        }
+        if !skipped.is_empty() {
+            ui.label(format!(
+                "{} ({}): {}",
+                self.t("Salteadas", "Skipped"),
+                skipped.len(),
+                notes_list(&skipped, 20)
+            ));
+        }
         ui.add_space(10.0);
         self.report(ui);
         ui.add_space(10.0);
-        if ui
-            .button(self.t("Volver al inicio", "Back to home"))
-            .clicked()
-        {
-            self.go_home();
-        }
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button(self.t("Volver al inicio", "Back to home"))
+                .clicked()
+            {
+                self.go_home();
+            }
+            let reopen = if pending.is_empty() {
+                self.t("↺ Reabrir esta afinación", "↺ Reopen this tuning")
+            } else {
+                self.t("↺ Seguir con las que faltan", "↺ Continue with the missing ones")
+            };
+            if ui.button(reopen).clicked() {
+                self.reopen_current();
+            }
+        });
     }
 
     /// Grafico de desvios + teclado + exportar CSV.
@@ -2148,6 +2279,19 @@ fn phase_text(position: usize, lang: Lang) -> (&'static str, &'static str) {
     }
 }
 
+/// "E3, D#3, D3 …" con como mucho `max` notas.
+fn notes_list(midis: &[u8], max: usize) -> String {
+    let mut names: Vec<String> = midis
+        .iter()
+        .take(max)
+        .filter_map(|m| Note::from_midi(*m).map(|n| n.display_name()))
+        .collect();
+    if midis.len() > max {
+        names.push("…".into());
+    }
+    names.join(", ")
+}
+
 fn string_count(midi: u8) -> u8 {
     Note::from_midi(midi).map(|n| n.string_count()).unwrap_or(1)
 }
@@ -2246,6 +2390,9 @@ impl eframe::App for TunerApp {
         egui::TopBottomPanel::top("bar").show(ctx, |ui| self.top_bar(ui));
         if self.confirm_restart {
             self.restart_dialog(ctx);
+        }
+        if self.confirm_finish {
+            self.finish_dialog(ctx);
         }
         egui::TopBottomPanel::bottom("footer").show(ctx, |ui| {
             ui.label(
