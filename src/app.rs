@@ -357,6 +357,8 @@ pub struct TunerApp {
     history: Vec<Session>,
     /// Preguntando con que La afinar (hoy o el de la ultima vez).
     choose_a4: bool,
+    /// Que se marca al tocar el teclado de "Tu piano": 2 o 3 cuerdas.
+    pick_strings: u8,
     detect_a4: Option<DetectA4>,
     /// Resultado del ultimo exportado: (ok, ruta o error).
     export_msg: Option<(bool, String)>,
@@ -406,6 +408,7 @@ impl TunerApp {
             confirm_finish: false,
             history: Session::list_all().unwrap_or_default(),
             choose_a4: false,
+            pick_strings: 2,
             detect_a4: None,
             export_msg: None,
             ignore_until: None,
@@ -1563,7 +1566,58 @@ impl TunerApp {
                 }
 
                 ui.add_space(6.0);
-                widgets::keyboard(ui, None, &HashMap::new(), string_count);
+                let (bi, tri) = (
+                    self.settings.piano.bichord_from,
+                    self.settings.piano.trichord_from,
+                );
+                let es = self.settings.lang == Lang::Es;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(if es { "Elegí en el dibujo:" } else { "Pick on the drawing:" })
+                            .strong(),
+                    );
+                    for (n, es_l, en_l) in [
+                        (2u8, "dónde empiezan las 2 cuerdas", "where 2 strings start"),
+                        (3u8, "dónde empiezan las 3 cuerdas", "where 3 strings start"),
+                    ] {
+                        let text = RichText::new(format!("■ {}", if es { es_l } else { en_l }))
+                            .color(strings_color(n));
+                        ui.selectable_value(&mut self.pick_strings, n, text);
+                    }
+                });
+                ui.label(
+                    RichText::new(if self.pick_strings == 2 {
+                        self.t(
+                            "Tocá la primera tecla que tiene 2 cuerdas (mirá adentro del piano: en los graves hay 1 cuerda por tecla, después 2 y después 3).",
+                            "Click the first key that has 2 strings (look inside the piano: the bass has 1 string per key, then 2, then 3).",
+                        )
+                    } else {
+                        self.t(
+                            "Tocá la primera tecla que tiene 3 cuerdas.",
+                            "Click the first key that has 3 strings.",
+                        )
+                    })
+                    .weak(),
+                );
+                let layout = move |m: u8| {
+                    if m < bi {
+                        1
+                    } else if m < tri {
+                        2
+                    } else {
+                        3
+                    }
+                };
+                let marker = if self.pick_strings == 2 { bi } else { tri };
+                if let Some(m) = widgets::keyboard(ui, Some(marker), &HashMap::new(), layout) {
+                    let (b, t) = pick_string_start(bi, tri, self.pick_strings, m);
+                    self.settings.piano.bichord_from = b;
+                    self.settings.piano.trichord_from = t;
+                    // Despues de las 2 cuerdas sigue la de 3.
+                    if self.pick_strings == 2 {
+                        self.pick_strings = 3;
+                    }
+                }
                 ui.horizontal(|ui| {
                     for n in 1..=3u8 {
                         ui.label(RichText::new("■").color(strings_color(n)));
@@ -2895,6 +2949,17 @@ fn phase_text(position: usize, lang: Lang) -> (&'static str, &'static str) {
     }
 }
 
+/// Nuevo inicio de 2 y 3 cuerdas al tocar la tecla `midi` en el teclado,
+/// marcando `which` (2 o 3). Mantiene 2 cuerdas <= 3 cuerdas.
+fn pick_string_start(bi: u8, tri: u8, which: u8, midi: u8) -> (u8, u8) {
+    let midi = midi.clamp(21, 108);
+    if which == 2 {
+        (midi, tri.max(midi))
+    } else {
+        (bi.min(midi), midi)
+    }
+}
+
 /// Distancia en cents de `a` respecto de `b` (negativo: `a` mas bajo).
 fn cents_between(a: f32, b: f32) -> f32 {
     1200.0 * (a / b).log2()
@@ -3158,6 +3223,17 @@ mod tests {
         assert_eq!(strike_agreement(3.0), 1.5);
         assert_eq!(strike_agreement(5.0), 2.5);
         assert_eq!(strike_agreement(1.0), 1.0);
+    }
+
+    #[test]
+    fn picking_string_starts_on_the_keyboard() {
+        // Marcar 2 cuerdas en A#1 (34): las 3 siguen donde estaban.
+        assert_eq!(pick_string_start(33, 52, 2, 34), (34, 52));
+        // Marcar 2 cuerdas arriba del inicio de 3: las 3 se corren.
+        assert_eq!(pick_string_start(33, 52, 2, 60), (60, 60));
+        // Marcar 3 cuerdas abajo del inicio de 2: las 2 se corren.
+        assert_eq!(pick_string_start(40, 52, 3, 30), (30, 30));
+        assert_eq!(pick_string_start(34, 52, 3, 48), (34, 48));
     }
 
     #[test]
