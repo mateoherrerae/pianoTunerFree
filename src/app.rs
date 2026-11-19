@@ -47,6 +47,34 @@ const MIN_VALID_READINGS: usize = 6;
 /// simulacion una cuerda limpia da menos de 1 cent.
 const MAX_VALID_IQR: f32 = 3.0;
 
+/// Diferencia maxima entre los dos golpes que hacen avanzar: la mitad del
+/// margen, como minimo 1 cent. Detecta que la clavija se siguio moviendo
+/// entre golpes; no protege del ruido (cada golpe ya es una mediana).
+/// PENDIENTE: calibrar con la variacion real entre golpes de una cuerda
+/// sin tocar (grabaciones), hoy desconocida.
+fn strike_agreement(tolerance: f32) -> f32 {
+    (tolerance / 2.0).max(1.0)
+}
+
+/// Progreso del avance por golpes: 0, 0.5 (el ultimo golpe esta bien) o
+/// 1 (los dos ultimos son validos, estan dentro del margen respecto de
+/// `reference` y coinciden entre si). Un golpe aproximado o desparejo
+/// corta la racha.
+fn strike_advance(strikes: &[Strike], tolerance: f32, reference: f32) -> f32 {
+    let in_zone = |s: &Strike| s.valid() && (s.cents - reference).abs() <= tolerance;
+    let Some(last) = strikes.last().filter(|s| in_zone(s)) else {
+        return 0.0;
+    };
+    match strikes.len().checked_sub(2).map(|i| strikes[i]) {
+        Some(prev)
+            if in_zone(&prev) && (prev.cents - last.cents).abs() <= strike_agreement(tolerance) =>
+        {
+            1.0
+        }
+        _ => 0.5,
+    }
+}
+
 fn classify_strike(n: usize, iqr: f32) -> StrikeClass {
     if n < MIN_VALID_READINGS {
         StrikeClass::Approx
@@ -923,19 +951,15 @@ impl TunerApp {
         self.strikes.back().copied().filter(|s| s.valid())
     }
 
-    /// Avance por golpes: 2 golpes seguidos buenos y dentro del margen.
-    /// En los unisonos el golpe se compara con la cuerda ya afinada y
-    /// ademas tiene que sonar parejo (sin batido).
+    /// Avance por golpes (ver [`strike_advance`]). En los unisonos el
+    /// objetivo es lo que midio la cuerda ya afinada.
     fn strike_progress(&self, kind: StepKind) -> Option<f32> {
-        let tol = self.settings.tolerance;
-        let reference = self.pitch_cents.unwrap_or(0.0);
-        let ok = |s: &Strike| match kind {
-            StepKind::Pitch => s.valid() && s.cents.abs() <= tol,
-            StepKind::Unison => s.valid() && (s.cents - reference).abs() <= tol,
-            _ => false,
+        let reference = match kind {
+            StepKind::Unison => self.pitch_cents.unwrap_or(0.0),
+            _ => 0.0,
         };
-        let run = self.strikes.iter().rev().take_while(|s| ok(s)).count();
-        Some((run as f32 / 2.0).min(1.0))
+        let strikes: Vec<Strike> = self.strikes.iter().copied().collect();
+        Some(strike_advance(&strikes, self.settings.tolerance, reference))
     }
 
     /// Avance automatico: progreso 0..1 (1 = avanzar), o None si no aplica.
@@ -1184,7 +1208,9 @@ impl TunerApp {
                     .show(ui, |ui| {
                         for (i, s) in self.history.iter().take(40).enumerate() {
                             ui.label(s.date_label());
-                            ui.label(RichText::new(s.piano_name.as_deref().unwrap_or("—")).strong());
+                            ui.label(
+                                RichText::new(s.piano_name.as_deref().unwrap_or("—")).strong(),
+                            );
                             ui.label(format!("La {:.1} Hz", s.a4_reference));
                             ui.label(format!(
                                 "{}/88 · {l_avg} {:.1} c",
@@ -1215,7 +1241,8 @@ impl TunerApp {
             .unwrap_or_default();
         let es = self.settings.lang == Lang::Es;
         let body = if pending.is_empty() {
-            self.t("Están todas las notas.", "Every note is done.").to_string()
+            self.t("Están todas las notas.", "Every note is done.")
+                .to_string()
         } else {
             format!(
                 "{} {}: {}",
@@ -2084,7 +2111,11 @@ impl TunerApp {
                     );
                 }
                 StrikeClass::Valid => {
-                    let off = if unison { last.cents - reference } else { last.cents };
+                    let off = if unison {
+                        last.cents - reference
+                    } else {
+                        last.cents
+                    };
                     let ok = off.abs() <= tol;
                     let mut text = format!(
                         "{} {:+.1} cents   ·   {:.2} Hz",
@@ -2356,7 +2387,10 @@ impl TunerApp {
             let reopen = if pending.is_empty() {
                 self.t("↺ Reabrir esta afinación", "↺ Reopen this tuning")
             } else {
-                self.t("↺ Seguir con las que faltan", "↺ Continue with the missing ones")
+                self.t(
+                    "↺ Seguir con las que faltan",
+                    "↺ Continue with the missing ones",
+                )
             };
             if ui.button(reopen).clicked() {
                 self.reopen_current();
@@ -2985,6 +3019,64 @@ mod tests {
         // sin tira: 3 cuerdas con recordatorio = 4 pasos
         assert_eq!(steps_for(3, true).len(), 4);
         assert_eq!(steps_for(3, false).len(), 3);
+    }
+
+    fn strike(cents: f32, class: StrikeClass) -> Strike {
+        Strike {
+            cents,
+            freq: 0.0,
+            class,
+            over_floor: 40.0,
+        }
+    }
+
+    #[test]
+    fn advances_only_with_two_agreeing_strikes_in_the_zone() {
+        use StrikeClass::*;
+        let tol = 3.0;
+        // Girando la clavija: los dos en la zona pero 5,3 cents distintos.
+        assert_eq!(
+            strike_advance(&[strike(2.5, Valid), strike(-2.8, Valid)], tol, 0.0),
+            0.5
+        );
+        // Quieta: coinciden.
+        assert_eq!(
+            strike_advance(&[strike(1.0, Valid), strike(0.4, Valid)], tol, 0.0),
+            1.0
+        );
+        // Un golpe aproximado o desparejo corta la racha.
+        assert_eq!(
+            strike_advance(&[strike(0.5, Approx), strike(0.4, Valid)], tol, 0.0),
+            0.5
+        );
+        assert_eq!(
+            strike_advance(&[strike(0.5, Valid), strike(0.4, Unstable)], tol, 0.0),
+            0.0
+        );
+        // Fuera de la zona.
+        assert_eq!(
+            strike_advance(&[strike(4.0, Valid), strike(3.5, Valid)], tol, 0.0),
+            0.0
+        );
+        // Unisono: la zona es respecto de la cuerda ya afinada (+2).
+        assert_eq!(
+            strike_advance(&[strike(4.5, Valid), strike(4.2, Valid)], tol, 2.0),
+            1.0
+        );
+        assert_eq!(
+            strike_advance(&[strike(-1.5, Valid), strike(-1.4, Valid)], tol, 2.0),
+            0.0
+        );
+        // Un solo golpe nunca alcanza.
+        assert_eq!(strike_advance(&[strike(0.0, Valid)], tol, 0.0), 0.5);
+        assert_eq!(strike_advance(&[], tol, 0.0), 0.0);
+    }
+
+    #[test]
+    fn agreement_scales_with_the_margin() {
+        assert_eq!(strike_agreement(3.0), 1.5);
+        assert_eq!(strike_agreement(5.0), 2.5);
+        assert_eq!(strike_agreement(1.0), 1.0);
     }
 
     #[test]
