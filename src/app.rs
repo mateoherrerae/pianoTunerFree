@@ -951,11 +951,31 @@ impl TunerApp {
         self.strikes.back().copied().filter(|s| s.valid())
     }
 
+    /// Objetivo de un unisono por golpes: lo que midio la cuerda ya
+    /// afinada de esta nota (en el paso anterior, o en la pasada 1 con
+    /// tira de fieltro). Asi los errores fijos (microfono, modelo,
+    /// estiramiento) se cancelan: solo importa que las cuerdas den lo mismo.
+    fn unison_reference(&self) -> Option<f32> {
+        self.pitch_cents.or_else(|| {
+            let flow = self.flow.as_ref()?;
+            let midi = flow.current_note()?.midi;
+            flow.session()
+                .completed_notes
+                .iter()
+                .find(|n| n.midi == midi)
+                .map(|n| n.final_cents)
+        })
+    }
+
     /// Avance por golpes (ver [`strike_advance`]). En los unisonos el
-    /// objetivo es lo que midio la cuerda ya afinada.
+    /// objetivo es lo que midio la cuerda ya afinada; sin esa medida no
+    /// avanza solo.
     fn strike_progress(&self, kind: StepKind) -> Option<f32> {
         let reference = match kind {
-            StepKind::Unison => self.pitch_cents.unwrap_or(0.0),
+            StepKind::Unison => match self.unison_reference() {
+                Some(r) => r,
+                None => return Some(0.0),
+            },
             _ => 0.0,
         };
         let strikes: Vec<Strike> = self.strikes.iter().copied().collect();
@@ -1851,6 +1871,7 @@ impl TunerApp {
         });
 
         // Pasos
+        let strike_unison = step.kind == StepKind::Unison && self.strike_on();
         ui.add_space(6.0);
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -1870,7 +1891,11 @@ impl TunerApp {
                     }
                 }
             });
-            if self.settings.show_details {
+            if strike_unison {
+                // El texto comun dice "hasta que no haya batido": en notas
+                // tan cortas la app no puede juzgar el batido.
+                self.strike_unison_help(ui);
+            } else if self.settings.show_details {
                 ui.label(RichText::new(self.pick(step.detail)).size(16.0));
             }
         });
@@ -1890,6 +1915,11 @@ impl TunerApp {
                 .back()
                 .filter(|s| s.class != StrikeClass::Unstable)
                 .map(|s| (s.cents, s.freq, false));
+        }
+        if strike_unison {
+            // El medidor marca la diferencia con la cuerda ya afinada.
+            let r = self.unison_reference().unwrap_or(0.0);
+            shown = shown.map(|s| (s.0 - r, s.1, s.2));
         }
         match step.kind {
             StepKind::Mute => {
@@ -2063,10 +2093,40 @@ impl TunerApp {
     }
 
     /// Resultado fijo del ultimo golpe + historial de golpes.
+    /// Instrucciones del unisono agudo: cada cuerda se afina sola.
+    fn strike_unison_help(&self, ui: &mut egui::Ui) {
+        let target = match self.unison_reference() {
+            Some(r) => format!("{r:+.1} cents"),
+            None => "?".into(),
+        };
+        let es = self.settings.lang == Lang::Es;
+        ui.label(
+            RichText::new(if es {
+                format!("Agudos: afiná esta cuerda SOLA. Apagá con la cuña la(s) que ya afinaste, para que suene solo esta, y llevala a {target} (lo que midió la primera cuerda).")
+            } else {
+                format!("Treble: tune this string ALONE. Mute the string(s) already tuned with the wedge so only this one sounds, and bring it to {target} (what the first string measured).")
+            })
+            .size(16.0)
+            .strong()
+            .color(ORANGE),
+        );
+        ui.label(
+            RichText::new(self.t(
+                "Con las cuerdas juntas la app mide una mezcla y no puede juzgar el batido en notas tan cortas. Al terminar la nota, sacá las cuñas y escuchá: si se oye «uaua», repasá.",
+                "With the strings together the app measures a blend and can't judge beats on such short notes. When the note is done, remove the wedges and listen: if you hear a \"wah-wah\", go over it again.",
+            ))
+            .weak(),
+        );
+    }
+
     fn strike_panel(&self, ui: &mut egui::Ui, kind: StepKind) {
         let tol = self.settings.tolerance;
         let unison = kind == StepKind::Unison;
-        let reference = self.pitch_cents.unwrap_or(0.0);
+        let reference = if unison {
+            self.unison_reference()
+        } else {
+            Some(0.0)
+        };
         ui.vertical_centered(|ui| {
             let Some(last) = self.strikes.back().copied() else {
                 ui.label(
@@ -2110,45 +2170,66 @@ impl TunerApp {
                         .color(ORANGE),
                     );
                 }
-                StrikeClass::Valid => {
-                    let off = if unison {
-                        last.cents - reference
-                    } else {
-                        last.cents
-                    };
-                    let ok = off.abs() <= tol;
-                    let mut text = format!(
-                        "{} {:+.1} cents   ·   {:.2} Hz",
-                        self.t("Golpe:", "Strike:"),
-                        last.cents,
-                        last.freq
-                    );
-                    if ok {
-                        text.push_str(self.t("   ·   ¡Afinada!", "   ·   In tune!"));
+                StrikeClass::Valid => match reference {
+                    None => {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} {:+.1} cents",
+                                self.t("Golpe:", "Strike:"),
+                                last.cents
+                            ))
+                            .size(24.0)
+                            .strong(),
+                        );
+                        ui.label(
+                            RichText::new(self.t(
+                                "No hay medida de la primera cuerda de esta nota: volvé con «Anterior» y afinala primero.",
+                                "There's no measurement of this note's first string: go «Back» and tune it first.",
+                            ))
+                            .color(ORANGE),
+                        );
                     }
-                    let mut rt = RichText::new(text).size(24.0).strong();
-                    if ok {
-                        rt = rt.color(GREEN);
-                    }
-                    ui.label(rt);
-                    if unison {
-                        ui.label(format!(
-                            "{} {reference:+.1} cents",
-                            self.t(
-                                "Igualala a la cuerda ya afinada:",
-                                "Match it to the string already tuned:"
+                    Some(r) => {
+                        let off = last.cents - r;
+                        let ok = off.abs() <= tol;
+                        let mut text = if unison {
+                            format!(
+                                "{} {off:+.1} cents   ·   ({} {:+.1})",
+                                self.t("Diferencia con la primera cuerda:", "Difference from the first string:"),
+                                self.t("golpe", "strike"),
+                                last.cents
                             )
-                        ));
+                        } else {
+                            format!(
+                                "{} {:+.1} cents   ·   {:.2} Hz",
+                                self.t("Golpe:", "Strike:"),
+                                last.cents,
+                                last.freq
+                            )
+                        };
+                        if ok {
+                            text.push_str(if unison {
+                                self.t("   ·   ¡Igual!", "   ·   Matched!")
+                            } else {
+                                self.t("   ·   ¡Afinada!", "   ·   In tune!")
+                            });
+                        }
+                        let mut rt = RichText::new(text).size(24.0).strong();
+                        if ok {
+                            rt = rt.color(GREEN);
+                        }
+                        ui.label(rt);
                     }
-                }
+                },
             }
             if self.strikes.len() > 1 {
+                let base = reference.unwrap_or(0.0);
                 let hist: Vec<String> = self
                     .strikes
                     .iter()
                     .map(|s| match s.class {
-                        StrikeClass::Valid => format!("{:+.1}", s.cents),
-                        StrikeClass::Approx => format!("({:+.1})", s.cents),
+                        StrikeClass::Valid => format!("{:+.1}", s.cents - base),
+                        StrikeClass::Approx => format!("({:+.1})", s.cents - base),
                         StrikeClass::Unstable => "?".into(),
                     })
                     .collect();
