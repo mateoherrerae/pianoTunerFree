@@ -94,6 +94,13 @@ pub struct Session {
     /// those.
     #[serde(default)]
     pub profile_id: Option<String>,
+    /// Nombre del piano que se esta afinando (para el historial y para
+    /// recordar la tonalidad de la ultima vez). `None` en sesiones viejas.
+    #[serde(default)]
+    pub piano_name: Option<String>,
+    /// Notas (MIDI) que se saltearon a proposito: no cuentan como pendientes.
+    #[serde(default)]
+    pub skipped: Vec<u8>,
 }
 
 impl Session {
@@ -111,6 +118,8 @@ impl Session {
             created_at: now,
             updated_at: now,
             profile_id: None,
+            piano_name: None,
+            skipped: Vec::new(),
         }
     }
 
@@ -170,10 +179,33 @@ impl Session {
             fs::create_dir_all(parent)?;
         }
 
+        // Primero a un archivo temporal y despues se renombra: si la
+        // computadora se apaga en el medio, el archivo anterior queda sano.
         let json = serde_json::to_string_pretty(self)?;
-        fs::write(&path, json)?;
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, json)?;
+        fs::rename(&tmp, &path)?;
 
         Ok(())
+    }
+
+    /// Fecha local corta para mostrar (ej. "19/11/2026").
+    pub fn date_label(&self) -> String {
+        self.updated_at
+            .with_timezone(&chrono::Local)
+            .format("%d/%m/%Y")
+            .to_string()
+    }
+
+    /// Las afinaciones guardadas de un piano, la mas reciente primero.
+    pub fn list_for_piano(name: &str) -> Vec<Session> {
+        let mut v: Vec<Session> = Self::list_all()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.piano_name.as_deref() == Some(name))
+            .collect();
+        v.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+        v
     }
 
     /// Load a session from a file path.
@@ -553,5 +585,20 @@ mod tests {
         assert_eq!(loaded.version, 1);
         assert!(loaded.profile_id.is_none());
         assert_eq!(loaded.current_note_index, 3);
+    }
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+
+    #[test]
+    fn old_sessions_load_without_piano_or_skipped() {
+        let json = r#"{"id":"x","mode":"concert","a4_reference":440.4,
+            "piano_offset_cents":0.0,"current_note_index":3,"completed_notes":[],
+            "created_at":"2026-11-18T18:27:46Z","updated_at":"2026-11-18T18:27:46Z"}"#;
+        let s: Session = serde_json::from_str(json).unwrap();
+        assert!(s.piano_name.is_none());
+        assert!(s.skipped.is_empty());
     }
 }
