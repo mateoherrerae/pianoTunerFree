@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use super::pitch::PitchDetector;
 use super::smoothing::MedianFilter;
+use super::strike::{StrikeResult, StrikeTracker};
 use super::traits::AudioSource;
 
 /// A pitch reading (or its absence) delivered from the worker thread to the
@@ -121,6 +122,9 @@ fn latest<T>(rx: &Receiver<T>) -> Option<T> {
 /// independent of pitch cadence.
 pub struct PitchWorker {
     results: Receiver<PitchUpdate>,
+    /// Golpes terminados (captura por golpe); canal aparte para que no se
+    /// pierdan entre lecturas comunes.
+    strikes: Receiver<StrikeResult>,
     warnings: Receiver<String>,
     target_tx: Sender<Option<f32>>,
     running: Arc<AtomicBool>,
@@ -149,6 +153,7 @@ impl PitchWorker {
     {
         let sample_rate = source.sample_rate();
         let (result_tx, results) = mpsc::channel();
+        let (strike_tx, strikes) = mpsc::channel();
         let (warning_tx, warnings) = mpsc::channel();
         let (target_tx, target_rx) = mpsc::channel::<Option<f32>>();
         let running = Arc::new(AtomicBool::new(true));
@@ -170,6 +175,7 @@ impl PitchWorker {
             let mut filter = MedianFilter::new(MedianFilter::DEFAULT_WINDOW);
             let mut gate = SilenceGate::new(SILENCE_TIMEOUT);
             let mut target: Option<f32> = None;
+            let mut tracker = StrikeTracker::new();
 
             while running_thread.load(Ordering::Relaxed) {
                 if let Some(err) = source.take_stream_error() {
@@ -180,6 +186,9 @@ impl PitchWorker {
                 }
 
                 if let Some(new_target) = latest(&target_rx) {
+                    if new_target != target {
+                        tracker.reset();
+                    }
                     target = new_target;
                 }
 
@@ -200,6 +209,13 @@ impl PitchWorker {
                     let db = 20.0 * rms.max(1e-6).log10();
                     level_thread.store(db.to_bits(), Ordering::Relaxed);
                     let now = Instant::now();
+                    // Solo con nota objetivo: la deteccion guiada no se
+                    // equivoca de octava; la libre si podria.
+                    if target.is_some() {
+                        if let Some(done) = tracker.observe_level(now, db) {
+                            let _ = strike_tx.send(done);
+                        }
+                    }
                     let mut env = envelope_thread.lock().unwrap();
                     env.push_back((now, rms));
                     while env
@@ -222,6 +238,9 @@ impl PitchWorker {
                 let now = Instant::now();
                 match detection {
                     Ok(pitch_result) => {
+                        // Al golpe va la lectura cruda: la mediana movil
+                        // mezclaria el golpe anterior con este.
+                        tracker.observe_pitch(now, pitch_result.frequency);
                         let frequency = filter.push(pitch_result.frequency);
                         gate.observe_success(now);
                         let _ = result_tx.send(PitchUpdate::Detected {
@@ -233,6 +252,9 @@ impl PitchWorker {
                     Err(_) => {
                         if gate.observe_failure(now) {
                             filter.clear();
+                            if let Some(done) = tracker.finish() {
+                                let _ = strike_tx.send(done);
+                            }
                             let _ = result_tx.send(PitchUpdate::Silence);
                         }
                     }
@@ -242,6 +264,7 @@ impl PitchWorker {
 
         Self {
             results,
+            strikes,
             warnings,
             target_tx,
             running,
@@ -262,6 +285,11 @@ impl PitchWorker {
     /// Take the freshest pitch update produced since the last call, if any.
     pub fn latest_update(&self) -> Option<PitchUpdate> {
         latest(&self.results)
+    }
+
+    /// Todos los golpes terminados desde la ultima llamada.
+    pub fn take_strikes(&self) -> Vec<StrikeResult> {
+        self.strikes.try_iter().collect()
     }
 
     /// Take the freshest audio-stream error reported since the last call, if
