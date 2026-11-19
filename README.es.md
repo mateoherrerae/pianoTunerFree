@@ -29,6 +29,7 @@ Abrilo con doble clic. Si Windows SmartScreen muestra un aviso, tocá **Más inf
 - **Modo tira de fieltro**: primero todas las cuerdas libres y después los unísonos, como los afinadores.
 - **Informe de afinación**: gráfico de desvíos sobre el teclado y exportar a CSV.
 - **Referencia con sonido de piano** (se escucha hasta en los graves con parlantes de notebook), atajo `R`.
+- **Elegir las cuerdas en el teclado**: tocás en el piano dibujado la primera tecla con 2 cuerdas y después la primera con 3.
 - **85 u 88 teclas**: muchos pianos viejos terminan en La; la app saltea las teclas que el tuyo no tiene.
 - **No se pierde nada**: cada afinación se guarda con su piano. Solo termina cuando no falta ninguna nota (o cuando tocás *Terminar afinación*), *Empezar de nuevo* conserva la anterior y cualquier afinación se puede reabrir desde *Afinaciones guardadas*.
 - **Captura por golpe en los agudos**: las notas agudas cortas se miden por golpe (sin el ruido del martillo, con la mediana de todo el golpe) y el resultado queda fijo hasta el próximo golpe, con los últimos 5 golpes a la vista. Avanza sola con 2 golpes válidos que coinciden entre sí. Los unísonos agudos se afinan cuerda por cuerda contra lo que midió la primera. Por ahora solo probado con simulaciones: ver [docs/VALIDACION_CAPTURA_POR_GOLPE.md](docs/VALIDACION_CAPTURA_POR_GOLPE.md).

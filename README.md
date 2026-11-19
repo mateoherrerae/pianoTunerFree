@@ -29,6 +29,7 @@ Double-click to open. If Windows SmartScreen shows a warning, click **More info 
 - **Felt strip mode**: tune every free string first, then all unisons in a second pass, like pro tuners.
 - **Tuning report**: deviation chart over the keyboard and CSV export.
 - **Piano-like reference tone** (audible even in the bass on laptop speakers), `R` shortcut.
+- **Pick the string layout on the keyboard**: click the first key with 2 strings, then the first with 3, right on the drawn piano.
 - **85 or 88 keys**: many old pianos end on A7; the app skips the keys yours doesn't have.
 - **Nothing gets lost**: every tuning is saved with its piano. It only finishes when no note is missing (or when you press *Finish tuning*), *Start over* keeps the old one, and any saved tuning can be reopened from *Saved tunings*.
 - **Strike capture for the treble**: short high notes are measured per strike (hammer noise skipped, median of the whole strike) and the result stays frozen until the next strike, with the last 5 strikes shown. Auto-advance after 2 valid strikes that agree with each other. Treble unisons are tuned one string at a time against what the first string measured. Simulated tests only so far: see [docs/VALIDACION_CAPTURA_POR_GOLPE.md](docs/VALIDACION_CAPTURA_POR_GOLPE.md).
