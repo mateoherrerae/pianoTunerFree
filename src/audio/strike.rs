@@ -271,7 +271,11 @@ mod tests {
     }
 
     #[test]
-    fn beating_strike_shows_a_wide_spread() {
+    /// Solo prueba el calculo de la dispersion (se usa para "golpe
+    /// desparejo"). No dice nada de batidos reales: con el detector de
+    /// verdad dos cuerdas desafinadas casi no dispersan (ver
+    /// `detector_tests::two_strings_together_blend`).
+    fn uneven_readings_show_a_wide_spread() {
         let mut t = StrikeTracker::new();
         let s = Instant::now();
         quiet(&mut t, s, 0, 300);
@@ -280,5 +284,128 @@ mod tests {
         });
         let r: Vec<_> = r.into_iter().chain(t.finish()).collect();
         assert!(r[0].iqr_cents > 4.0, "{}", r[0].iqr_cents);
+    }
+}
+
+/// Golpes simulados pasados por el detector real, como lo hace el hilo del
+/// microfono. OJO: es un modelo ideal (sin cuerdas falsas, acople ni sala);
+/// que pase no demuestra que funcione en un piano real.
+#[cfg(test)]
+mod detector_tests {
+    use super::*;
+    use crate::audio::PitchDetector;
+
+    const SR: u32 = 48_000;
+
+    struct Noise(u64);
+    impl Noise {
+        fn next(&mut self) -> f32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            ((self.0 >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
+        }
+    }
+
+    /// Cuerdas `(cents, amplitud)` con 3 parciales e inarmonicidad, que
+    /// decaen `decay` dB/s desde `peak_db`, con 0,3 s de silencio antes y
+    /// ruido de fondo a `floor_db`.
+    fn strings(f: f32, s: &[(f32, f32)], decay: f32, peak_db: f32, floor_db: f32) -> Vec<f32> {
+        let mut rng = Noise(0x9e37_79b9_7f4a_7c15);
+        let pre = 0.3;
+        let n = (1.3 * SR as f32) as usize;
+        let (a0, fl, b) = (
+            10f32.powf(peak_db / 20.0),
+            10f32.powf(floor_db / 20.0),
+            4e-3,
+        );
+        let mut out = vec![0.0; n];
+        for (i, x) in out.iter_mut().enumerate() {
+            let t = i as f32 / SR as f32 - pre;
+            *x = fl * rng.next();
+            if t < 0.0 {
+                continue;
+            }
+            let env = a0 * 10f32.powf(-decay * t / 20.0) * (1.0 - (-t / 0.002).exp());
+            for (k, (c, amp)) in s.iter().enumerate() {
+                let fs = f * 2f32.powf(c / 1200.0);
+                for h in 1..=3 {
+                    let hn = h as f32;
+                    let fh = hn * fs * ((1.0 + b * hn * hn) / (1.0 + b)).sqrt();
+                    let w = [1.0, 0.35, 0.12][h - 1];
+                    *x += env * amp * w * (std::f32::consts::TAU * fh * t + k as f32).sin();
+                }
+            }
+        }
+        out
+    }
+
+    /// Igual que el hilo del microfono: cada 10 ms, nivel de los ultimos
+    /// 20 ms y deteccion guiada sobre lo ultimo capturado.
+    fn run(sig: &[f32], target: f32) -> Vec<StrikeResult> {
+        let det = PitchDetector::new(SR);
+        let mut tr = StrikeTracker::new();
+        let t0 = Instant::now();
+        let hop = SR as usize / 100;
+        let mut out = Vec::new();
+        let mut i = hop;
+        while i <= sig.len() {
+            let now = t0 + Duration::from_secs_f64(i as f64 / SR as f64);
+            let tail = &sig[i.saturating_sub(SR as usize / 50)..i];
+            let rms = (tail.iter().map(|x| x * x).sum::<f32>() / tail.len() as f32).sqrt();
+            out.extend(tr.observe_level(now, 20.0 * rms.max(1e-6).log10()));
+            if let Ok(p) = det.detect_for_target(&sig[i.saturating_sub(SR as usize / 2)..i], target)
+            {
+                tr.observe_pitch(now, p.frequency);
+            }
+            i += hop;
+        }
+        out.extend(tr.finish());
+        out
+    }
+
+    fn cents(hz: f32, target: f32) -> f32 {
+        1200.0 * (hz / target).log2()
+    }
+
+    #[test]
+    fn noise_burst_gives_no_readings() {
+        // Golpe de llave / ruido: dispara un "golpe" pero sin lecturas.
+        let mut rng = Noise(7);
+        let mut sig: Vec<f32> = (0..SR as usize).map(|_| 2e-4 * rng.next()).collect();
+        for x in &mut sig[14_400..28_800] {
+            *x += 0.1 * rng.next();
+        }
+        let r = run(&sig, 2093.0);
+        assert!(!r.is_empty());
+        assert!(r.iter().all(|s| s.n == 0), "{r:?}");
+    }
+
+    #[test]
+    fn weak_short_treble_strike_still_measures() {
+        // C8 suave: pocas lecturas, pero el valor es correcto.
+        let r = run(&strings(4186.0, &[(2.0, 1.0)], 100.0, -55.0, -75.0), 4186.0);
+        let s = r.iter().max_by_key(|s| s.n).unwrap();
+        assert!(s.n > 0 && s.n < 20, "{}", s.n);
+        assert!((cents(s.median_hz, 4186.0) - 2.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn two_strings_together_blend() {
+        // C7 con la 2da cuerda 4 cents arriba (bate a ~4,8 Hz): la mediana
+        // queda entre las dos y la dispersion casi no sube. Por eso los
+        // unisonos agudos se afinan con la cuerda sola.
+        let one = run(&strings(2093.0, &[(0.0, 1.0)], 70.0, -20.0, -75.0), 2093.0);
+        let two = run(
+            &strings(2093.0, &[(0.0, 1.0), (4.0, 1.0)], 70.0, -20.0, -75.0),
+            2093.0,
+        );
+        let (a, b) = (
+            one.iter().max_by_key(|s| s.n).unwrap(),
+            two.iter().max_by_key(|s| s.n).unwrap(),
+        );
+        let shift = cents(b.median_hz, 2093.0) - cents(a.median_hz, 2093.0);
+        assert!(shift > 0.5 && shift < 3.5, "corrimiento {shift}");
+        assert!(b.iqr_cents < 3.0, "dispersion {}", b.iqr_cents);
     }
 }
