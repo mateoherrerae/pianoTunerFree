@@ -11,7 +11,7 @@ use piano_tuner_free::audio::{
 };
 use piano_tuner_free::beats::{self, BeatInfo};
 use piano_tuner_free::intervals;
-use piano_tuner_free::settings::{Lang, Level, PianoConfig, Settings, StretchSel};
+use piano_tuner_free::settings::{Lang, Level, PianoConfig, Settings, StretchSel, StrikeMode};
 use piano_tuner_free::tuning::inharmonicity::stretch_from_profile;
 use piano_tuner_free::tuning::{
     Note, PianoProfile, Session, Temperament, TuningFlow, TuningMode, TuningOrder,
@@ -26,6 +26,32 @@ enum Screen {
     Free,
     Measure,
 }
+
+/// Resultado de un golpe de tecla (captura por golpe).
+#[derive(Debug, Clone, Copy)]
+struct Strike {
+    cents: f32,
+    freq: f32,
+    /// Dispersion dentro del golpe, en cents.
+    iqr: f32,
+    /// Lecturas juntadas.
+    n: usize,
+}
+
+impl Strike {
+    /// Suficientes lecturas para confiar en el numero.
+    fn enough(&self) -> bool {
+        self.n >= 8
+    }
+
+    /// Confiable: suficientes lecturas y sonido parejo.
+    fn good(&self) -> bool {
+        self.enough() && self.iqr <= 6.0
+    }
+}
+
+/// Golpes que se recuerdan para el historial.
+const STRIKE_HISTORY: usize = 5;
 
 /// Ultima lectura del microfono.
 struct Reading {
@@ -290,6 +316,8 @@ pub struct TunerApp {
     last_frame: Instant,
     /// Lecturas recientes (para saber si la aguja esta quieta).
     recent: std::collections::VecDeque<(Instant, f32)>,
+    /// Ultimos golpes de la nota actual (el mas nuevo al final).
+    strikes: std::collections::VecDeque<Strike>,
 }
 
 impl TunerApp {
@@ -333,6 +361,7 @@ impl TunerApp {
             strobe_phase: 0.0,
             last_frame: Instant::now(),
             recent: Default::default(),
+            strikes: Default::default(),
         };
         app.ensure_mic();
         app
@@ -470,6 +499,30 @@ impl TunerApp {
             .filter(|(t, _)| *t >= self.step_started)
             .collect();
         self.beat = beats::analyze(&since_step);
+
+        let finished = worker.take_strikes();
+        if let Some(t) = target {
+            for s in finished {
+                // Golpes de antes de esta nota o mientras sonaba la referencia.
+                if s.at < self.step_started || self.ignore_until.is_some_and(|u| s.at < u) {
+                    continue;
+                }
+                let cents = if s.n > 0 {
+                    1200.0 * (s.median_hz / t).log2()
+                } else {
+                    0.0
+                };
+                self.strikes.push_back(Strike {
+                    cents,
+                    freq: s.median_hz,
+                    iqr: s.iqr_cents,
+                    n: s.n,
+                });
+                while self.strikes.len() > STRIKE_HISTORY {
+                    self.strikes.pop_front();
+                }
+            }
+        }
 
         let update = worker.latest_update();
         if self.ignore_until.is_some_and(|t| now < t) {
@@ -828,13 +881,51 @@ impl TunerApp {
     fn new_step(&mut self) {
         self.reading = None;
         self.recent.clear();
+        self.strikes.clear();
         self.lock_since = None;
         self.beat = None;
         self.step_started = Instant::now();
     }
 
+    /// La nota actual se afina con captura por golpe.
+    fn strike_on(&self) -> bool {
+        self.screen == Screen::Tuning
+            && self
+                .current_target()
+                .is_some_and(|t| self.settings.strike_mode.applies(t))
+    }
+
+    /// El ultimo golpe confiable, si lo hay.
+    fn last_good_strike(&self) -> Option<Strike> {
+        self.strikes.back().copied().filter(|s| s.good())
+    }
+
+    /// Avance por golpes: 2 golpes seguidos buenos y dentro del margen.
+    /// En los unisonos el golpe se compara con la cuerda ya afinada y
+    /// ademas tiene que sonar parejo (sin batido).
+    fn strike_progress(&self, kind: StepKind) -> Option<f32> {
+        let tol = self.settings.tolerance;
+        let reference = self.pitch_cents.unwrap_or(0.0);
+        let ok = |s: &Strike| match kind {
+            StepKind::Pitch => s.good() && s.cents.abs() <= tol,
+            StepKind::Unison => s.good() && s.iqr <= 3.0 && (s.cents - reference).abs() <= tol,
+            _ => false,
+        };
+        let run = self.strikes.iter().rev().take_while(|s| ok(s)).count();
+        Some((run as f32 / 2.0).min(1.0))
+    }
+
     /// Avance automatico: progreso 0..1 (1 = avanzar), o None si no aplica.
     fn auto_progress(&mut self, kind: StepKind) -> Option<f32> {
+        let wants = match kind {
+            StepKind::Pitch => self.settings.auto_advance,
+            StepKind::Unison => self.settings.auto_unison,
+            _ => false,
+        };
+        if wants && self.strike_on() {
+            self.lock_since = None;
+            return self.strike_progress(kind);
+        }
         let ok = match kind {
             StepKind::Pitch if self.settings.auto_advance => matches!(
                 self.shown_reading(),
@@ -1416,6 +1507,16 @@ impl TunerApp {
     fn section_help(&mut self, ui: &mut egui::Ui) {
         let title = self.t("Ayudas", "Assists");
         let s = &self.settings;
+        let strike_l = (
+            s.t("Captura por golpe", "Strike capture"),
+            s.t("Agudos (desde C6)", "Treble (from C6)"),
+            s.t("Todo el piano", "Whole piano"),
+            s.t("Apagada", "Off"),
+            s.t(
+                "Junta todo lo que suena en cada golpe y deja el resultado fijo hasta el próximo. Ideal para los agudos que duran poco.",
+                "Gathers everything each strike sounds and freezes the result until the next one. Best for short treble notes.",
+            ),
+        );
         let l = (
             s.t(
                 "Recordarme apagar las cuerdas antes de afinar",
@@ -1506,6 +1607,14 @@ impl TunerApp {
                         ui.add(
                             egui::Slider::new(&mut self.settings.hold_secs, 0.0..=8.0).suffix(" s"),
                         );
+                        ui.end_row();
+                        ui.label(strike_l.0).on_hover_text(strike_l.4);
+                        ui.horizontal(|ui| {
+                            let m = &mut self.settings.strike_mode;
+                            ui.selectable_value(m, StrikeMode::Treble, strike_l.1);
+                            ui.selectable_value(m, StrikeMode::Always, strike_l.2);
+                            ui.selectable_value(m, StrikeMode::Off, strike_l.3);
+                        });
                         ui.end_row();
                     });
                 if before != self.settings.assists() {
@@ -1721,14 +1830,28 @@ impl TunerApp {
             self.t("◀ baja: tensar", "◀ flat: tighten"),
             self.t("alta: aflojar ▶", "sharp: loosen ▶"),
         );
-        let shown = self.shown_reading().map(|(r, f)| (r.cents, r.freq, f));
+        let strike_on = self.strike_on();
+        let mut shown = self.shown_reading().map(|(r, f)| (r.cents, r.freq, f));
+        if strike_on && !shown.is_some_and(|s| s.2) {
+            // Entre golpes queda fijo el resultado del ultimo golpe, no la
+            // cola del sonido.
+            shown = self
+                .strikes
+                .back()
+                .filter(|s| s.enough())
+                .map(|s| (s.cents, s.freq, false));
+        }
         match step.kind {
             StepKind::Mute => {
                 widgets::cents_meter(ui, None, self.settings.tolerance, true, labels);
             }
             _ => {
                 self.meters(ui, shown.map(|s| (s.0, s.2)), labels);
-                reading_line(ui, shown, &self.settings);
+                if strike_on {
+                    self.strike_panel(ui, step.kind);
+                } else {
+                    reading_line(ui, shown, &self.settings);
+                }
                 if step.kind == StepKind::Pitch {
                     self.stability_label(ui);
                 }
@@ -1825,7 +1948,13 @@ impl TunerApp {
             .show(ui, |ui| self.report(ui));
 
         // Acciones
-        let last_cents = self.reading.as_ref().map(|r| r.cents);
+        let last_cents = if strike_on {
+            self.last_good_strike()
+                .map(|s| s.cents)
+                .or(self.reading.as_ref().map(|r| r.cents))
+        } else {
+            self.reading.as_ref().map(|r| r.cents)
+        };
         if confirm && step.kind == StepKind::Pitch {
             self.pitch_cents = last_cents;
         }
@@ -1881,6 +2010,99 @@ impl TunerApp {
         } else if changed_step {
             self.new_step();
         }
+    }
+
+    /// Resultado fijo del ultimo golpe + historial de golpes.
+    fn strike_panel(&self, ui: &mut egui::Ui, kind: StepKind) {
+        let tol = self.settings.tolerance;
+        let unison = kind == StepKind::Unison;
+        let reference = self.pitch_cents.unwrap_or(0.0);
+        ui.vertical_centered(|ui| {
+            let Some(last) = self.strikes.back().copied() else {
+                ui.label(
+                    RichText::new(self.t(
+                        "Tocá la tecla con un golpe firme: cada golpe queda capturado.",
+                        "Strike the key firmly: each strike gets captured.",
+                    ))
+                    .size(20.0)
+                    .weak(),
+                );
+                return;
+            };
+            if !last.enough() {
+                ui.label(
+                    RichText::new(self.t(
+                        "Golpe débil: tocá más fuerte o acercá el micrófono.",
+                        "Weak strike: play harder or move the mic closer.",
+                    ))
+                    .size(20.0)
+                    .color(ORANGE),
+                );
+            } else {
+                let off = if unison { last.cents - reference } else { last.cents };
+                let ok = last.good() && off.abs() <= tol && (!unison || last.iqr <= 3.0);
+                let mut text = format!(
+                    "{} {:+.1} cents   ·   {:.2} Hz",
+                    self.t("Golpe:", "Strike:"),
+                    last.cents,
+                    last.freq
+                );
+                if ok {
+                    text.push_str(self.t("   ·   ¡Afinada!", "   ·   In tune!"));
+                }
+                let mut rt = RichText::new(text).size(24.0).strong();
+                if ok {
+                    rt = rt.color(GREEN);
+                }
+                ui.label(rt);
+                if unison {
+                    ui.label(format!(
+                        "{} {reference:+.1} cents",
+                        self.t(
+                            "Igualala a la cuerda ya afinada:",
+                            "Match it to the string already tuned:"
+                        )
+                    ));
+                }
+                if last.iqr > if unison { 3.0 } else { 6.0 } {
+                    ui.label(
+                        RichText::new(if unison {
+                            self.t(
+                                "Hay batido: las cuerdas todavía no suenan iguales.",
+                                "Beating: the strings don't match yet.",
+                            )
+                        } else {
+                            self.t(
+                                "Golpe inestable (¿suena otra cuerda o hay ruido?): repetilo.",
+                                "Unsteady strike (another string sounding, or noise?): repeat it.",
+                            )
+                        })
+                        .color(ORANGE),
+                    );
+                }
+            }
+            if self.strikes.len() > 1 {
+                let hist: Vec<String> = self
+                    .strikes
+                    .iter()
+                    .map(|s| {
+                        if s.enough() {
+                            format!("{:+.1}", s.cents)
+                        } else {
+                            "—".into()
+                        }
+                    })
+                    .collect();
+                ui.label(
+                    RichText::new(format!(
+                        "{} {}",
+                        self.t("Últimos golpes:", "Last strikes:"),
+                        hist.join("  ·  ")
+                    ))
+                    .weak(),
+                );
+            }
+        });
     }
 
     /// Intervalos con notas ya afinadas y su batido esperado.
