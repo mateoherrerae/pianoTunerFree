@@ -30,6 +30,8 @@ Abrilo con doble clic. Si Windows SmartScreen muestra un aviso, tocá **Más inf
 - **Informe de afinación**: gráfico de desvíos sobre el teclado y exportar a CSV.
 - **Referencia con sonido de piano** (se escucha hasta en los graves con parlantes de notebook), atajo `R`.
 - **85 u 88 teclas**: muchos pianos viejos terminan en La; la app saltea las teclas que el tuyo no tiene.
+- **No se pierde nada**: cada afinación se guarda con su piano. Solo termina cuando no falta ninguna nota (o cuando tocás *Terminar afinación*), *Empezar de nuevo* conserva la anterior y cualquier afinación se puede reabrir desde *Afinaciones guardadas*.
+- **Volver a afinar el mismo piano**: la app recuerda el La de la última vez y te deja subirlo a esa tonalidad, ir primero a la mitad (si es mucho) o afinarlo donde está hoy.
 - Interfaz en **español e inglés**.
 
 ## Consejos de micrófono (notebooks)

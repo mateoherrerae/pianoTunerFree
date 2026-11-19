@@ -30,6 +30,8 @@ Double-click to open. If Windows SmartScreen shows a warning, click **More info 
 - **Tuning report**: deviation chart over the keyboard and CSV export.
 - **Piano-like reference tone** (audible even in the bass on laptop speakers), `R` shortcut.
 - **85 or 88 keys**: many old pianos end on A7; the app skips the keys yours doesn't have.
+- **Nothing gets lost**: every tuning is saved with its piano. It only finishes when no note is missing (or when you press *Finish tuning*), *Start over* keeps the old one, and any saved tuning can be reopened from *Saved tunings*.
+- **Tune the same piano again**: the app remembers last time's A and lets you raise it back to that pitch, go halfway first (big raises) or tune it where it is today.
 - **English and Spanish** interface.
 
 ## Microphone tips (laptops)
