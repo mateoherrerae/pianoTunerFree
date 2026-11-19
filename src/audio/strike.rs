@@ -40,6 +40,8 @@ pub struct StrikeResult {
     pub n: usize,
     /// Volumen maximo del golpe, en dBFS.
     pub peak_db: f32,
+    /// Cuanto sobresalio el golpe sobre el ruido de fondo, en dB.
+    pub over_floor_db: f32,
     /// Cuando fue el golpe.
     pub at: Instant,
 }
@@ -47,6 +49,7 @@ pub struct StrikeResult {
 struct Active {
     onset: Instant,
     peak_db: f32,
+    floor_db: f32,
     readings: Vec<f32>,
 }
 
@@ -117,6 +120,7 @@ impl StrikeTracker {
             self.active = Some(Active {
                 onset: now,
                 peak_db: db,
+                floor_db: floor,
                 readings: Vec::new(),
             });
             return done;
@@ -162,6 +166,7 @@ impl StrikeTracker {
             iqr_cents,
             n,
             peak_db: a.peak_db,
+            over_floor_db: a.peak_db - a.floor_db,
             at: a.onset,
         })
     }

@@ -27,26 +27,49 @@ enum Screen {
     Measure,
 }
 
+/// Que tan confiable es un golpe. Los golpes sin ninguna lectura de la
+/// nota (golpe de llave, voces, ruido) ni llegan aca: se ignoran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrikeClass {
+    /// Pocas lecturas (menos de ~110 ms de sonido usable): el valor se
+    /// muestra como aproximado y no cuenta para avanzar.
+    Approx,
+    /// Lecturas desparejas dentro del golpe: hay que repetirlo.
+    Unstable,
+    /// Golpe valido.
+    Valid,
+}
+
+/// Lecturas minimas para un golpe valido. Cada lectura mira 60 ms y se
+/// toma cada 10 ms, asi que 6 lecturas son ~110 ms de sonido.
+const MIN_VALID_READINGS: usize = 6;
+/// Dispersion maxima (rango intercuartil, cents) de un golpe valido. En
+/// simulacion una cuerda limpia da menos de 1 cent.
+const MAX_VALID_IQR: f32 = 3.0;
+
+fn classify_strike(n: usize, iqr: f32) -> StrikeClass {
+    if n < MIN_VALID_READINGS {
+        StrikeClass::Approx
+    } else if iqr > MAX_VALID_IQR {
+        StrikeClass::Unstable
+    } else {
+        StrikeClass::Valid
+    }
+}
+
 /// Resultado de un golpe de tecla (captura por golpe).
 #[derive(Debug, Clone, Copy)]
 struct Strike {
     cents: f32,
     freq: f32,
-    /// Dispersion dentro del golpe, en cents.
-    iqr: f32,
-    /// Lecturas juntadas.
-    n: usize,
+    class: StrikeClass,
+    /// Cuanto sobresalio sobre el ruido de fondo (dB).
+    over_floor: f32,
 }
 
 impl Strike {
-    /// Suficientes lecturas para confiar en el numero.
-    fn enough(&self) -> bool {
-        self.n >= 8
-    }
-
-    /// Confiable: suficientes lecturas y sonido parejo.
-    fn good(&self) -> bool {
-        self.enough() && self.iqr <= 6.0
+    fn valid(&self) -> bool {
+        self.class == StrikeClass::Valid
     }
 }
 
@@ -507,16 +530,16 @@ impl TunerApp {
                 if s.at < self.step_started || self.ignore_until.is_some_and(|u| s.at < u) {
                     continue;
                 }
-                let cents = if s.n > 0 {
-                    1200.0 * (s.median_hz / t).log2()
-                } else {
-                    0.0
-                };
+                // Sin ninguna lectura de la nota: no fue un golpe de la tecla
+                // (llave, voz, ruido). Se ignora sin avisar.
+                if s.n == 0 {
+                    continue;
+                }
                 self.strikes.push_back(Strike {
-                    cents,
+                    cents: 1200.0 * (s.median_hz / t).log2(),
                     freq: s.median_hz,
-                    iqr: s.iqr_cents,
-                    n: s.n,
+                    class: classify_strike(s.n, s.iqr_cents),
+                    over_floor: s.over_floor_db,
                 });
                 while self.strikes.len() > STRIKE_HISTORY {
                     self.strikes.pop_front();
@@ -897,7 +920,7 @@ impl TunerApp {
 
     /// El ultimo golpe confiable, si lo hay.
     fn last_good_strike(&self) -> Option<Strike> {
-        self.strikes.back().copied().filter(|s| s.good())
+        self.strikes.back().copied().filter(|s| s.valid())
     }
 
     /// Avance por golpes: 2 golpes seguidos buenos y dentro del margen.
@@ -907,8 +930,8 @@ impl TunerApp {
         let tol = self.settings.tolerance;
         let reference = self.pitch_cents.unwrap_or(0.0);
         let ok = |s: &Strike| match kind {
-            StepKind::Pitch => s.good() && s.cents.abs() <= tol,
-            StepKind::Unison => s.good() && s.iqr <= 3.0 && (s.cents - reference).abs() <= tol,
+            StepKind::Pitch => s.valid() && s.cents.abs() <= tol,
+            StepKind::Unison => s.valid() && (s.cents - reference).abs() <= tol,
             _ => false,
         };
         let run = self.strikes.iter().rev().take_while(|s| ok(s)).count();
@@ -1838,7 +1861,7 @@ impl TunerApp {
             shown = self
                 .strikes
                 .back()
-                .filter(|s| s.enough())
+                .filter(|s| s.class != StrikeClass::Unstable)
                 .map(|s| (s.cents, s.freq, false));
         }
         match step.kind {
@@ -2029,68 +2052,73 @@ impl TunerApp {
                 );
                 return;
             };
-            if !last.enough() {
-                ui.label(
-                    RichText::new(self.t(
-                        "Golpe débil: tocá más fuerte o acercá el micrófono.",
-                        "Weak strike: play harder or move the mic closer.",
-                    ))
-                    .size(20.0)
-                    .color(ORANGE),
-                );
-            } else {
-                let off = if unison { last.cents - reference } else { last.cents };
-                let ok = last.good() && off.abs() <= tol && (!unison || last.iqr <= 3.0);
-                let mut text = format!(
-                    "{} {:+.1} cents   ·   {:.2} Hz",
-                    self.t("Golpe:", "Strike:"),
-                    last.cents,
-                    last.freq
-                );
-                if ok {
-                    text.push_str(self.t("   ·   ¡Afinada!", "   ·   In tune!"));
-                }
-                let mut rt = RichText::new(text).size(24.0).strong();
-                if ok {
-                    rt = rt.color(GREEN);
-                }
-                ui.label(rt);
-                if unison {
-                    ui.label(format!(
-                        "{} {reference:+.1} cents",
-                        self.t(
-                            "Igualala a la cuerda ya afinada:",
-                            "Match it to the string already tuned:"
-                        )
-                    ));
-                }
-                if last.iqr > if unison { 3.0 } else { 6.0 } {
+            match last.class {
+                StrikeClass::Unstable => {
                     ui.label(
-                        RichText::new(if unison {
-                            self.t(
-                                "Hay batido: las cuerdas todavía no suenan iguales.",
-                                "Beating: the strings don't match yet.",
-                            )
-                        } else {
-                            self.t(
-                                "Golpe inestable (¿suena otra cuerda o hay ruido?): repetilo.",
-                                "Unsteady strike (another string sounding, or noise?): repeat it.",
-                            )
-                        })
+                        RichText::new(self.t(
+                            "Golpe desparejo (¿suena otra cuerda o hubo ruido?): repetilo.",
+                            "Uneven strike (another string sounding, or noise?): repeat it.",
+                        ))
+                        .size(20.0)
                         .color(ORANGE),
                     );
+                }
+                StrikeClass::Approx => {
+                    let why = if last.over_floor < 25.0 {
+                        self.t(
+                            "golpe débil: tocá más firme o acercá el micrófono",
+                            "weak strike: play firmer or move the mic closer",
+                        )
+                    } else {
+                        self.t("golpe muy corto: repetilo", "very short strike: repeat it")
+                    };
+                    ui.label(
+                        RichText::new(format!(
+                            "{} {:+.1} cents ({}) · {why}",
+                            self.t("Golpe:", "Strike:"),
+                            last.cents,
+                            self.t("aprox.", "approx.")
+                        ))
+                        .size(20.0)
+                        .color(ORANGE),
+                    );
+                }
+                StrikeClass::Valid => {
+                    let off = if unison { last.cents - reference } else { last.cents };
+                    let ok = off.abs() <= tol;
+                    let mut text = format!(
+                        "{} {:+.1} cents   ·   {:.2} Hz",
+                        self.t("Golpe:", "Strike:"),
+                        last.cents,
+                        last.freq
+                    );
+                    if ok {
+                        text.push_str(self.t("   ·   ¡Afinada!", "   ·   In tune!"));
+                    }
+                    let mut rt = RichText::new(text).size(24.0).strong();
+                    if ok {
+                        rt = rt.color(GREEN);
+                    }
+                    ui.label(rt);
+                    if unison {
+                        ui.label(format!(
+                            "{} {reference:+.1} cents",
+                            self.t(
+                                "Igualala a la cuerda ya afinada:",
+                                "Match it to the string already tuned:"
+                            )
+                        ));
+                    }
                 }
             }
             if self.strikes.len() > 1 {
                 let hist: Vec<String> = self
                     .strikes
                     .iter()
-                    .map(|s| {
-                        if s.enough() {
-                            format!("{:+.1}", s.cents)
-                        } else {
-                            "—".into()
-                        }
+                    .map(|s| match s.class {
+                        StrikeClass::Valid => format!("{:+.1}", s.cents),
+                        StrikeClass::Approx => format!("({:+.1})", s.cents),
+                        StrikeClass::Unstable => "?".into(),
                     })
                     .collect();
                 ui.label(
@@ -2957,6 +2985,15 @@ mod tests {
         // sin tira: 3 cuerdas con recordatorio = 4 pasos
         assert_eq!(steps_for(3, true).len(), 4);
         assert_eq!(steps_for(3, false).len(), 3);
+    }
+
+    #[test]
+    fn strike_classes() {
+        // Golpes debiles reales con pocas lecturas: aproximados, no ruido.
+        assert_eq!(classify_strike(4, 0.1), StrikeClass::Approx);
+        assert_eq!(classify_strike(6, 0.5), StrikeClass::Valid);
+        assert_eq!(classify_strike(30, 3.5), StrikeClass::Unstable);
+        assert_eq!(classify_strike(30, 3.0), StrikeClass::Valid);
     }
 
     #[test]
