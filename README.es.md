@@ -31,7 +31,7 @@ Abrilo con doble clic. Si Windows SmartScreen muestra un aviso, tocá **Más inf
 - **Referencia con sonido de piano** (se escucha hasta en los graves con parlantes de notebook), atajo `R`.
 - **85 u 88 teclas**: muchos pianos viejos terminan en La; la app saltea las teclas que el tuyo no tiene.
 - **No se pierde nada**: cada afinación se guarda con su piano. Solo termina cuando no falta ninguna nota (o cuando tocás *Terminar afinación*), *Empezar de nuevo* conserva la anterior y cualquier afinación se puede reabrir desde *Afinaciones guardadas*.
-- **Captura por golpe en los agudos**: las notas agudas cortas se miden por golpe (sin el ruido del martillo, con la mediana de todo el golpe) y el resultado queda fijo hasta el próximo golpe, con los últimos 5 golpes a la vista. Avanza sola con 2 golpes buenos; en los unísonos agudos avisa si hay batido.
+- **Captura por golpe en los agudos**: las notas agudas cortas se miden por golpe (sin el ruido del martillo, con la mediana de todo el golpe) y el resultado queda fijo hasta el próximo golpe, con los últimos 5 golpes a la vista. Avanza sola con 2 golpes válidos que coinciden entre sí. Los unísonos agudos se afinan cuerda por cuerda contra lo que midió la primera. Por ahora solo probado con simulaciones: ver [docs/VALIDACION_CAPTURA_POR_GOLPE.md](docs/VALIDACION_CAPTURA_POR_GOLPE.md).
 - **Volver a afinar el mismo piano**: la app recuerda el La de la última vez y te deja subirlo a esa tonalidad, ir primero a la mitad (si es mucho) o afinarlo donde está hoy.
 - Interfaz en **español e inglés**.
 
