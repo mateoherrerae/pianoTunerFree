@@ -176,27 +176,95 @@ impl TuningFlow {
             // Una nota revisitada reemplaza su registro anterior.
             let name = note.display_name();
             self.session.completed_notes.retain(|cn| cn.note != name);
+            self.session.skipped.retain(|m| *m != note.midi);
             self.session.complete_note(name, final_cents);
         }
-        self.advance()
+        self.advance_to_pending()
     }
 
     /// Skip the current note without recording a completion (it must not
-    /// count as 0.0 cents in progress or history). Returns `true` once the
+    /// count as 0.0 cents in progress or history). Queda anotada como
+    /// salteada para que no cuente como pendiente. Returns `true` once the
     /// session is finished.
     pub fn skip_current_note(&mut self) -> bool {
+        if let Some(note) = self.tuning_order.note_at(self.current_note_idx) {
+            let done = self.is_done(note.midi);
+            if !done && !self.session.skipped.contains(&note.midi) {
+                self.session.skipped.push(note.midi);
+            }
+        }
         self.session.skip_note();
-        self.advance()
+        self.advance_to_pending()
     }
 
-    /// Advance to the next note, persisting progress on the session
-    /// (including the final advance to 88, so a finished session is stored
-    /// complete and doesn't get reopened on resume).
-    fn advance(&mut self) -> bool {
+    /// Pasar a la siguiente nota del orden sin anotar nada (pasada de
+    /// unisonos con tira, donde todas las notas ya estan registradas).
+    pub fn pass_note(&mut self) -> bool {
         self.current_note_idx += 1;
         self.session.current_note_index = self.current_note_idx;
         self.in_tune_latched = false;
         self.is_finished()
+    }
+
+    /// La nota ya tiene registro.
+    pub fn is_done(&self, midi: u8) -> bool {
+        self.session.completed_notes.iter().any(|cn| cn.midi == midi)
+    }
+
+    /// La nota falta: ni afinada ni salteada a proposito.
+    pub fn is_pending(&self, midi: u8) -> bool {
+        !self.is_done(midi) && !self.session.skipped.contains(&midi)
+    }
+
+    /// Notas que faltan, en el orden de afinacion.
+    pub fn pending_notes(&self) -> Vec<u8> {
+        (0..self.tuning_order.len())
+            .filter_map(|p| self.tuning_order.note_at(p))
+            .map(|n| n.midi)
+            .filter(|m| self.is_pending(*m))
+            .collect()
+    }
+
+    /// Ir a la proxima nota que falte: primero hacia adelante y, si no
+    /// queda ninguna, desde el principio. Solo termina cuando no falta
+    /// nada (antes terminaba al pasar por la ultima posicion aunque
+    /// quedaran notas sin afinar).
+    fn advance_to_pending(&mut self) -> bool {
+        let len = self.tuning_order.len();
+        let next = (self.current_note_idx + 1..len)
+            .chain(0..len)
+            .find(|&p| {
+                self.tuning_order
+                    .note_at(p)
+                    .is_some_and(|n| self.is_pending(n.midi))
+            });
+        self.current_note_idx = next.unwrap_or(NOTE_COUNT);
+        self.session.current_note_index = self.current_note_idx;
+        self.in_tune_latched = false;
+        self.is_finished()
+    }
+
+    /// Terminar la afinacion a mano, aunque falten notas.
+    pub fn finish(&mut self) {
+        self.current_note_idx = NOTE_COUNT;
+        self.session.current_note_index = NOTE_COUNT;
+        self.session.updated_at = chrono::Utc::now();
+    }
+
+    /// Volver a abrir una afinacion terminada: arranca en la primera nota
+    /// que falte (o en la primera del orden si estan todas).
+    pub fn reopen(&mut self) {
+        let first = (0..self.tuning_order.len())
+            .find(|&p| {
+                self.tuning_order
+                    .note_at(p)
+                    .is_some_and(|n| self.is_pending(n.midi))
+            })
+            .unwrap_or(0);
+        self.current_note_idx = first;
+        self.session.current_note_index = first;
+        self.session.updated_at = chrono::Utc::now();
+        self.in_tune_latched = false;
     }
 
     /// Jump straight to the note with this MIDI number (e.g. the user
@@ -223,6 +291,7 @@ impl TuningFlow {
         if let Some(note) = self.tuning_order.note_at(self.current_note_idx) {
             let name = note.display_name();
             self.session.completed_notes.retain(|cn| cn.note != name);
+            self.session.skipped.retain(|m| *m != note.midi);
         }
         self.in_tune_latched = false;
         true
@@ -252,6 +321,62 @@ mod tests {
         let recs: Vec<_> = f.session().completed_notes.iter().collect();
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].final_cents, -1.0);
+    }
+
+    #[test]
+    fn jumping_to_the_last_note_does_not_finish_with_notes_missing() {
+        // Lo que paso afinando: F3..F7 hechas, se toca A0 (ultima del
+        // orden) y antes la afinacion se daba por terminada.
+        let mut f = flow();
+        for _ in 0..49 {
+            f.confirm_current_note(0.5);
+        }
+        assert!(f.go_to_midi(21));
+        let finished = f.confirm_current_note(0.2);
+        assert!(!finished);
+        // Vuelve a la primera que falta: F#7.
+        assert_eq!(f.current_note().unwrap().midi, 102);
+        assert_eq!(f.pending_notes().len(), 88 - 50);
+    }
+
+    #[test]
+    fn finishes_only_when_nothing_is_missing() {
+        let mut f = flow();
+        for i in 0..88 {
+            let done = if i % 10 == 0 {
+                f.skip_current_note()
+            } else {
+                f.confirm_current_note(0.0)
+            };
+            assert_eq!(done, i == 87, "nota {i}");
+        }
+        assert!(f.pending_notes().is_empty());
+    }
+
+    #[test]
+    fn finish_and_reopen() {
+        let mut f = flow();
+        f.confirm_current_note(1.0);
+        f.confirm_current_note(1.0);
+        f.finish();
+        assert!(f.is_finished());
+        assert!(f.session().is_complete());
+        f.reopen();
+        assert!(!f.session().is_complete());
+        assert_eq!(f.current_note_index(), 2);
+        assert_eq!(f.session().completed_notes.len(), 2);
+    }
+
+    #[test]
+    fn unison_pass_walks_every_note() {
+        let mut f = flow();
+        for _ in 0..88 {
+            f.confirm_current_note(0.0);
+        }
+        assert!(f.go_to_midi(53));
+        for i in 0..88 {
+            assert_eq!(f.pass_note(), i == 87);
+        }
     }
 
     #[test]

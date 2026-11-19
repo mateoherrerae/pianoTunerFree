@@ -1255,7 +1255,11 @@ impl TunerApp {
             // Nota de una cuerda en la pasada de unisonos, o tecla que este
             // piano no tiene (pianos de 85): no hay nada que hacer.
             if let Some(f) = self.flow.as_mut() {
-                f.skip_current_note();
+                if pass == StripPass::Unisons {
+                    f.pass_note();
+                } else {
+                    f.skip_current_note();
+                }
             }
             self.reset_note_state();
             return;
@@ -1490,7 +1494,7 @@ impl TunerApp {
                 changed_step = true;
             } else if pass == StripPass::Unisons {
                 // Conserva el desvio medido en la primera pasada.
-                flow.skip_current_note();
+                flow.pass_note();
                 changed_note = true;
             } else {
                 flow.confirm_current_note(final_cents);
@@ -1514,7 +1518,11 @@ impl TunerApp {
                 while flow.current_note().is_some_and(|n| n.midi > top) && flow.go_back_note() {}
             }
         } else if skip {
-            flow.skip_current_note();
+            if pass == StripPass::Unisons {
+                flow.pass_note();
+            } else {
+                flow.skip_current_note();
+            }
             changed_note = true;
         } else if let Some(midi) = clicked {
             changed_note = flow.go_to_midi(midi);
