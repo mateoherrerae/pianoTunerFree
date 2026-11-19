@@ -276,6 +276,8 @@ pub struct TunerApp {
     confirm_restart: bool,
     /// Preguntando si terminar la afinacion aunque falten notas.
     confirm_finish: bool,
+    /// Afinaciones guardadas (se relee al volver al inicio).
+    history: Vec<Session>,
     detect_a4: Option<DetectA4>,
     /// Resultado del ultimo exportado: (ok, ruta o error).
     export_msg: Option<(bool, String)>,
@@ -321,6 +323,7 @@ impl TunerApp {
             pitch_cents: None,
             confirm_restart: false,
             confirm_finish: false,
+            history: Session::list_all().unwrap_or_default(),
             detect_a4: None,
             export_msg: None,
             ignore_until: None,
@@ -606,15 +609,55 @@ impl TunerApp {
     fn start_tuning(&mut self) {
         self.settings.unison_pass = false;
         self.settings.apply_string_layout();
-        if let Some(old) = self.resumable.take() {
-            let _ = old.delete();
+        // La afinacion a medio hacer no se borra: queda en el historial
+        // como terminada y se puede reabrir.
+        if let Some(mut old) = self.resumable.take() {
+            old.current_note_index = old.current_note_index.max(88);
+            let _ = old.save();
         }
-        self.flow = Some(TuningFlow::new(
+        let mut flow = TuningFlow::new(
             TuningMode::Concert,
             TuningOrder::new(),
             Temperament::with_a4(self.settings.piano.a4),
             self.settings.piano.stretch_curve(),
-        ));
+        );
+        flow.session_mut().piano_name = Some(self.settings.piano.name.clone());
+        self.flow = Some(flow);
+        self.save_session();
+        self.enter(Screen::Tuning);
+    }
+
+    /// Antes de seguir una afinacion, cargar el piano con el que se hizo
+    /// (cuerdas, teclas) y su La, para no mezclar tonalidades.
+    fn select_piano_of(&mut self, session: &Session) {
+        if let Some(name) = &session.piano_name {
+            if let Some(p) = self.settings.saved_pianos.iter().find(|p| &p.name == name) {
+                self.settings.piano = p.clone();
+            }
+        }
+        self.settings.piano.a4 = session.a4_reference;
+    }
+
+    /// Reabrir una afinacion guardada (terminada o no) y seguirla.
+    fn reopen_session(&mut self, mut session: Session) {
+        // La otra afinacion en curso sigue guardada tal cual.
+        self.resumable = None;
+        self.settings.unison_pass = false;
+        session.updated_at = chrono::Utc::now();
+        self.select_piano_of(&session);
+        self.settings.apply_string_layout();
+        let a4 = session.a4_reference;
+        let mut flow = TuningFlow::resume(
+            session,
+            TuningOrder::new(),
+            Temperament::with_a4(a4),
+            self.settings.piano.stretch_curve(),
+        );
+        if flow.is_finished() {
+            flow.reopen();
+        }
+        self.flow = Some(flow);
+        self.save_session();
         self.enter(Screen::Tuning);
     }
 
@@ -622,6 +665,7 @@ impl TunerApp {
         let Some(session) = self.resumable.take() else {
             return;
         };
+        self.select_piano_of(&session);
         self.settings.apply_string_layout();
         let a4 = session.a4_reference;
         self.flow = Some(TuningFlow::resume(
@@ -655,6 +699,7 @@ impl TunerApp {
     fn go_home(&mut self) {
         self.save_session();
         self.resumable = Session::load_recent().ok().flatten();
+        self.history = Session::list_all().unwrap_or_default();
         self.screen = Screen::Home;
     }
 
@@ -772,6 +817,7 @@ impl TunerApp {
         self.section_piano(ui);
         self.section_help(ui);
         self.section_mic(ui);
+        self.section_history(ui);
 
         if self.settings.piano.trichord_from < self.settings.piano.bichord_from {
             self.settings.piano.trichord_from = self.settings.piano.bichord_from;
@@ -782,11 +828,17 @@ impl TunerApp {
         let big = egui::vec2(290.0, 56.0);
         ui.horizontal_wrapped(|ui| {
             if let Some(s) = &self.resumable {
+                let piano = s
+                    .piano_name
+                    .clone()
+                    .map(|n| format!("{n} · "))
+                    .unwrap_or_default();
                 let label = format!(
-                    "{} ({} {}/88)",
+                    "{}\n{piano}La {:.1} Hz · {}/88 {}",
                     self.t("Continuar afinación", "Resume tuning"),
-                    self.t("nota", "note"),
-                    s.current_note_index + 1,
+                    s.a4_reference,
+                    s.completed_notes.len(),
+                    self.t("hechas", "done"),
                 );
                 if ui
                     .add(
@@ -838,8 +890,8 @@ impl TunerApp {
         let (title, body, yes, no) = (
             self.t("¿Empezar de nuevo?", "Start over?"),
             self.t(
-                "Se pierde el progreso de la afinación guardada.",
-                "The saved tuning progress will be lost.",
+                "La afinación a medio hacer no se borra: queda en «Afinaciones guardadas» y la podés reabrir.",
+                "The unfinished tuning isn't deleted: it stays in \"Saved tunings\" and you can reopen it.",
             ),
             self.t("Sí, empezar de nuevo", "Yes, start over"),
             self.t("Cancelar", "Cancel"),
@@ -871,6 +923,62 @@ impl TunerApp {
             self.start_tuning();
         } else if cancel {
             self.confirm_restart = false;
+        }
+    }
+
+    /// Todas las afinaciones guardadas, con boton para abrirlas.
+    fn section_history(&mut self, ui: &mut egui::Ui) {
+        if self.history.is_empty() {
+            return;
+        }
+        let title = format!(
+            "{} ({})",
+            self.t("Afinaciones guardadas", "Saved tunings"),
+            self.history.len()
+        );
+        let (l_open, l_cont, l_done, l_going, l_avg) = (
+            self.t("Abrir", "Open"),
+            self.t("Seguir", "Continue"),
+            self.t("terminada", "finished"),
+            self.t("en curso", "in progress"),
+            self.t("prom.", "avg."),
+        );
+        let mut open = None;
+        egui::CollapsingHeader::new(RichText::new(title).size(18.0).strong())
+            .id_salt("history")
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(self.t(
+                        "Nada se borra: si terminaste sin querer, abrila y seguí donde estabas.",
+                        "Nothing gets deleted: if you finished by mistake, open it and keep going.",
+                    ))
+                    .weak(),
+                );
+                egui::Grid::new("history_grid")
+                    .striped(true)
+                    .num_columns(6)
+                    .show(ui, |ui| {
+                        for (i, s) in self.history.iter().take(40).enumerate() {
+                            ui.label(s.date_label());
+                            ui.label(RichText::new(s.piano_name.as_deref().unwrap_or("—")).strong());
+                            ui.label(format!("La {:.1} Hz", s.a4_reference));
+                            ui.label(format!(
+                                "{}/88 · {l_avg} {:.1} c",
+                                s.completed_notes.len(),
+                                s.average_deviation()
+                            ));
+                            ui.label(if s.is_complete() { l_done } else { l_going });
+                            let b = if s.is_complete() { l_open } else { l_cont };
+                            if ui.button(b).clicked() {
+                                open = Some(i);
+                            }
+                            ui.end_row();
+                        }
+                    });
+            });
+        if let Some(i) = open {
+            let s = self.history[i].clone();
+            self.reopen_session(s);
         }
     }
 
