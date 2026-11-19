@@ -97,6 +97,29 @@ impl PianoConfig {
     }
 }
 
+/// Cuando usar la captura por golpe.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum StrikeMode {
+    /// Solo en los agudos (desde C6), donde las notas duran poco.
+    #[default]
+    Treble,
+    /// En todo el piano.
+    Always,
+    /// Nunca: lectura continua como antes.
+    Off,
+}
+
+impl StrikeMode {
+    /// Se usa para una nota con este objetivo (Hz)?
+    pub fn applies(self, target_hz: f32) -> bool {
+        match self {
+            StrikeMode::Treble => target_hz >= 1046.0,
+            StrikeMode::Always => true,
+            StrikeMode::Off => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Settings {
@@ -136,6 +159,8 @@ pub struct Settings {
     pub ref_piano: bool,
     /// Microfono elegido (None = el predeterminado de Windows).
     pub mic_device: Option<String>,
+    /// Captura por golpe (agudos cortos).
+    pub strike_mode: StrikeMode,
 }
 
 impl Default for Settings {
@@ -161,6 +186,7 @@ impl Default for Settings {
             unison_pass: false,
             free_stretch: true,
             mic_device: None,
+            strike_mode: StrikeMode::Treble,
         };
         s.apply_level(Level::Basic);
         s
@@ -275,6 +301,16 @@ mod tests {
         assert_eq!(p.top_midi(), 105);
         assert!(p.has_key(105));
         assert!(!p.has_key(106));
+    }
+
+    #[test]
+    fn strike_mode_defaults_to_treble_only() {
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.strike_mode, StrikeMode::Treble);
+        assert!(!s.strike_mode.applies(880.0)); // A5
+        assert!(s.strike_mode.applies(1046.5)); // C6
+        assert!(StrikeMode::Always.applies(27.5));
+        assert!(!StrikeMode::Off.applies(4186.0));
     }
 
     #[test]
